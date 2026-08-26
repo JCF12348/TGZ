@@ -57,7 +57,6 @@ let tgzTransferProgressFrame = null;
 let tgzTransferTargetProgress = 0;
 let tgzImageErrorResponse = null;
 let nativeNrfMtu = 20;
-let nativeNrfNoResponseRemaining = 20;
 let nativeNrfWaiters = [];
 
 const MAX_SLOT_IMAGE_SIZE = 1024 * 1024;
@@ -119,7 +118,6 @@ const TGZ_PACKET_LENGTHS = [244, 180, 120, 64, 20];
 const TGZ_WRITE_PACING_MS = 4;
 const TGZ_WRITE_RESPONSE_INTERVAL = 50;
 const NATIVE_NRF_WRITE_PACING_MS = 4;
-const NATIVE_NRF_WRITE_RESPONSE_INTERVAL = 20;
 const TGZ_PANEL_NAMES = {
   1: 'SE0398 A0',
   2: 'SE0398 New-A1',
@@ -274,7 +272,6 @@ function resetVariables(options = {}) {
   tgzStorageFreeSlots = 0;
   tgzImageErrorResponse = null;
   nativeNrfMtu = 20;
-  nativeNrfNoResponseRemaining = NATIVE_NRF_WRITE_RESPONSE_INTERVAL;
   nativeNrfWaiters.splice(0).forEach(waiter => {
     clearTimeout(waiter.timer);
     waiter.reject(new Error('连接已重置'));
@@ -1767,7 +1764,7 @@ function finishSlotImageRead() {
   }
 }
 
-async function writeImage(data, step = 'bw', waitForPrepare = false) {
+async function writeImage(data, step = 'bw', waitForPrepare = false, commandWriter = write, onProgress = null) {
   const chunkSize = parseInt(document.getElementById('mtusize').value, 10) - 2;
   const interleavedCount = parseInt(document.getElementById('interleavedcount').value, 10);
 
@@ -1810,16 +1807,17 @@ async function writeImage(data, step = 'bw', waitForPrepare = false) {
       ...chunk,
     ];
     if (noReplyCount > 0) {
-      if (!await write(EpdCmd.WRITE_IMG, payload, false)) return false;
+      if (!await commandWriter(EpdCmd.WRITE_IMG, payload, false)) return false;
       noReplyCount--;
     } else {
-      if (!await write(EpdCmd.WRITE_IMG, payload, true)) return false;
+      if (!await commandWriter(EpdCmd.WRITE_IMG, payload, true)) return false;
       noReplyCount = interleavedCount;
     }
 
     if (chunkIdx === 0 && preparePromise && !await preparePromise) return false;
 
     const percent = Math.floor((chunkIdx + 1) * 100 / count);
+    if (onProgress) onProgress(chunkIdx + 1, count, percent);
     if (percent >= nextLogPercent || chunkIdx + 1 === count) {
       addLog(`${stepName}传输进度：${percent}% (${chunkIdx + 1}/${count} 包)`, '⇑');
       while (nextLogPercent <= percent) nextLogPercent += 10;
@@ -2476,79 +2474,21 @@ function encodeNativeSlotAction(action, slot) {
   return payload;
 }
 
-async function prepareNativeNrfTransfer(store, slot, refreshAfterSave) {
-  const requested = store ? slot : 0xFFFFFFFF;
-  const ready = waitForNativeNrfMessage(
-    message => message === 'ready=1' || message.startsWith('slot_error='),
-    95000,
-    store ? '槽位擦除准备' : '直接显示准备'
-  );
-  await writeNativeNrfPayload(new Uint8Array([
-    EpdCmd.SET_SLOT,
-    ...encodeNativeSlotAction(0, requested),
-  ]), false);
-  const response = await ready;
-  if (response !== 'ready=1') throw new Error(`槽位准备失败：${response}`);
-
-  if (store) {
-    await writeNativeNrfPayload(new Uint8Array([
-      EpdCmd.SET_SLOT,
-      ...encodeNativeSlotAction(refreshAfterSave ? 3 : 2, slot),
-    ]), false);
+async function writeNativeNrfCommand(cmd, data, withResponse = true) {
+  let payload = [cmd];
+  if (data) {
+    if (typeof data === 'string') data = hex2bytes(data);
+    payload.push(...data);
   }
-}
-
-async function writeNativeNrfImage(packedPixels, mode) {
-  const raw = packedPixels instanceof Uint8Array
-    ? packedPixels
-    : new Uint8Array(packedPixels);
-  const encoded = rleEncode(raw);
-  const useRle = rleSupport && encoded.length < raw.length;
-  const transfer = useRle ? encoded : raw;
-  const chunkSize = Math.max(18, Math.min(245, nativeNrfMtu - 2));
-  const packetCount = Math.ceil(transfer.length / chunkSize);
-  const receipt = waitForNativeNrfMessage(
-    message => message === 'image=received' ||
-      message.startsWith('image_error=') || message.startsWith('slot_error='),
-    45000,
-    '图片完整接收确认'
-  );
-
-  addLog(useRle
-    ? `nRF RLE 压缩：${raw.length} -> ${transfer.length} 字节 (${(transfer.length * 100 / raw.length).toFixed(1)}%)`
-    : `nRF 原始传输：${raw.length} 字节`);
-  addLog(`开始发送：${mode === 'fourColor' ? '四色' : '六色'}，${packetCount} 个 ATT 分包`);
-  const startedAt = performance.now();
-
-  for (let index = 0; index < packetCount; index++) {
-    const chunk = transfer.slice(index * chunkSize, (index + 1) * chunkSize);
-    const flags = (index === 0 ? 0x02 : 0x00) | (useRle ? 0x04 : 0x00);
-    const packet = new Uint8Array(2 + chunk.length);
-    packet[0] = EpdCmd.WRITE_IMG;
-    packet[1] = flags;
-    packet.set(chunk, 2);
-
-    const preferFast = nativeNrfNoResponseRemaining > 0;
-    const fastUsed = await writeNativeNrfPayload(packet, preferFast);
-    if (preferFast && fastUsed) {
-      nativeNrfNoResponseRemaining--;
-      await sleep(NATIVE_NRF_WRITE_PACING_MS);
-    } else {
-      nativeNrfNoResponseRemaining = NATIVE_NRF_WRITE_RESPONSE_INTERVAL;
-    }
-
-    const exactProgress = Math.min(99, (index + 1) * 100 / packetCount);
-    const percent = Math.floor(exactProgress);
-    setStatus(`正在传输 ${percent}% · ${index + 1}/${packetCount}`);
-    updateTgzTransferOverlay(exactProgress);
+  try {
+    await writeNativeNrfPayload(Uint8Array.from(payload), !withResponse);
+    if (!withResponse) await sleep(NATIVE_NRF_WRITE_PACING_MS);
+    return true;
+  } catch (error) {
+    console.error(error);
+    addLog(`nRF write: ${error.message || error}`);
+    return false;
   }
-
-  updateTgzTransferOverlay(100);
-  setStatus('图片数据已发送，设备正在写入 Flash...');
-  addLog(`${packetCount} 个 ATT 分包已写入 BLE，用时 ${((performance.now() - startedAt) / 1000).toFixed(1)} 秒`);
-  const response = await receipt;
-  if (response !== 'image=received') throw new Error(`设备拒绝图像：${response}`);
-  addLog(`设备已完整接收图片，总用时 ${((performance.now() - startedAt) / 1000).toFixed(1)} 秒`);
 }
 
 
@@ -2677,26 +2617,52 @@ async function sendimgNative(options = {}) {
 
   const refreshAfterSave = storeRequested && options.refreshAfterSave === true;
   if (storeRequested) cacheCurrentSlotPreview(targetSlot, processedData, mode);
-  await prepareNativeNrfTransfer(storeRequested, targetSlot, refreshAfterSave);
-  const ready = !storeRequested || refreshAfterSave
-    ? waitForNativeNrfMessage(message => message === 'ready=1' || message.startsWith('display_error='),
-      95000, '屏幕刷新完成')
-    : null;
-  await writeNativeNrfImage(packedPixels, mode);
+  if (storeRequested && !await writeNativeNrfCommand(
+    EpdCmd.SET_SLOT,
+    encodeNativeSlotAction(0, targetSlot),
+    true
+  )) throw new Error('槽位写入准备失败');
+
+  const transferOk = await writeImage(
+    packedPixels,
+    'bw',
+    false,
+    writeNativeNrfCommand,
+    (completed, total, percent) => {
+      const exactProgress = Math.min(99, completed * 99 / total);
+      setStatus(`正在传输 ${percent}% · ${completed}/${total}`);
+      updateTgzTransferOverlay(exactProgress);
+    }
+  );
+  if (!transferOk) throw new Error('图片分包发送失败');
+
+  const completion = waitForNativeNrfMessage(
+    message => message === 'ready=1' ||
+      message.startsWith('display_error=') || message.startsWith('slot_error='),
+    95000,
+    storeRequested ? '槽位保存完成' : '屏幕刷新完成'
+  );
+  const completionSent = storeRequested
+    ? await writeNativeNrfCommand(
+      EpdCmd.SET_SLOT,
+      encodeNativeSlotAction(refreshAfterSave ? 3 : 2, targetSlot),
+      true
+    )
+    : await writeNativeNrfCommand(EpdCmd.REFRESH, null, true);
+  if (!completionSent) throw new Error(storeRequested ? '槽位提交失败' : '刷新命令发送失败');
+  setStatus(storeRequested ? '图片已发送，正在保存槽位...' : '图片已发送，屏幕刷新中...');
+  const response = await completion;
+  if (response !== 'ready=1') throw new Error(response);
+  updateTgzTransferOverlay(100);
 
   if (storeRequested) {
     await refreshSlots(Math.floor(targetSlot / SLOT_PAGE_SIZE) * SLOT_PAGE_SIZE);
     if (refreshAfterSave) {
-      const response = await ready;
-      if (response !== 'ready=1') throw new Error(`屏幕刷新失败：${response}`);
       setStatus(`槽位 ${targetSlot + 1} 已保存并刷新。`);
     } else {
       setStatus(`图片已保存到槽位 ${targetSlot + 1}，可用设备按键切换。`);
     }
   } else {
-    setStatus('传输完成，屏幕刷新中...');
-    const response = await ready;
-    if (response !== 'ready=1') throw new Error(`屏幕刷新失败：${response}`);
     setStatus('屏幕刷新完成。');
   }
   return true;
@@ -2744,7 +2710,8 @@ async function sendimg(options = {}) {
     setStatus(`传输失败：${error.message || error}`);
     addLog(`传输失败：${error.message || error}`);
     hideTgzTransferOverlay();
-    if (bleDevice && bleDevice.gatt && bleDevice.gatt.connected) bleDevice.gatt.disconnect();
+    if (!nrfEpdCharacteristic && bleDevice && bleDevice.gatt && bleDevice.gatt.connected)
+      bleDevice.gatt.disconnect();
     return false;
   } finally {
     imageTransferActive = false;
