@@ -46,6 +46,7 @@ let tgzRx = null;
 let tgzTxSequence = 0;
 let tgzPacketLengthIndex = 0;
 let tgzNoResponseRemaining = 50;
+let tgzFastWriteEnabled = true;
 let tgzResponseWaiters = [];
 let tgzPanelId = 0;
 let tgzStorageAvailable = false;
@@ -245,6 +246,7 @@ function resetVariables(options = {}) {
   tgzTxSequence = 0;
   tgzPacketLengthIndex = 0;
   tgzNoResponseRemaining = TGZ_WRITE_RESPONSE_INTERVAL;
+  tgzFastWriteEnabled = true;
   tgzResponseWaiters.splice(0).forEach(waiter => {
     clearTimeout(waiter.timer);
     waiter.reject(new Error('连接已重置'));
@@ -297,6 +299,20 @@ async function writeCharacteristicValue(characteristic, value, withResponse) {
   if (typeof characteristic.writeValue === 'function')
     return characteristic.writeValue(bytes);
   throw new Error('当前浏览器不支持蓝牙特征写入');
+}
+
+async function writeTgzPacket(characteristic, packet, preferFast) {
+  if (preferFast) {
+    try {
+      await writeCharacteristicValue(characteristic, packet, false);
+      return true;
+    } catch (_) {
+      await writeCharacteristicValue(characteristic, packet, true);
+      return false;
+    }
+  }
+  await writeCharacteristicValue(characteristic, packet, true);
+  return false;
 }
 
 async function writeGattPayload(payload, withResponse) {
@@ -1780,7 +1796,7 @@ function handleTgzNotification(event) {
 
 async function writeTgzFrame(frame, options = {}) {
   if (!epdCharacteristic) throw new Error('设备未连接');
-  const fast = options.fast !== false &&
+  let fast = options.fast !== false && tgzFastWriteEnabled &&
     epdCharacteristic.properties?.writeWithoutResponse &&
     typeof epdCharacteristic.writeValueWithoutResponse === 'function';
   const sequenceStart = tgzTxSequence;
@@ -1794,12 +1810,17 @@ async function writeTgzFrame(frame, options = {}) {
         const forceResponse = fast && (
           tgzNoResponseRemaining === 0 || index === packets.length - 1
         );
-        if (fast && !forceResponse) {
-          await writeCharacteristicValue(epdCharacteristic, packets[index], false);
+        const useFast = fast && !forceResponse;
+        const fastStillUsable = await writeTgzPacket(epdCharacteristic, packets[index], useFast);
+        if (useFast && fastStillUsable) {
           tgzNoResponseRemaining--;
           await sleep(TGZ_WRITE_PACING_MS);
         } else {
-          await writeCharacteristicValue(epdCharacteristic, packets[index], true);
+          if (useFast) {
+            fast = false;
+            tgzFastWriteEnabled = false;
+            addLog('快速写入被浏览器拒绝，已切换兼容写入。');
+          }
           tgzNoResponseRemaining = TGZ_WRITE_RESPONSE_INTERVAL;
         }
         written++;
