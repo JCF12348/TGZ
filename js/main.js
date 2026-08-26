@@ -98,9 +98,9 @@ const DEFAULT_PAGE_BACKGROUND_SETTINGS = {
   mask: 0.22
 };
 
-const EPD_SERVICE_UUID = 0xffff;
-const EPD_WRITE_UUID = 0xff01;
-const EPD_NOTIFY_UUID = 0xff02;
+const EPD_SERVICE_UUID = '0000ffff-0000-1000-8000-00805f9b34fb';
+const EPD_WRITE_UUID = '0000ff01-0000-1000-8000-00805f9b34fb';
+const EPD_NOTIFY_UUID = '0000ff02-0000-1000-8000-00805f9b34fb';
 const TGZ_WIDTH = 760;
 const TGZ_HEIGHT = 528;
 const TGZ_RLE_CHUNK_SIZE = 1024;
@@ -288,15 +288,23 @@ function queueBleWrite(task) {
   return run;
 }
 
+async function writeCharacteristicValue(characteristic, value, withResponse) {
+  const bytes = value instanceof Uint8Array ? value : Uint8Array.from(value);
+  if (withResponse && typeof characteristic.writeValueWithResponse === 'function')
+    return characteristic.writeValueWithResponse(bytes);
+  if (!withResponse && typeof characteristic.writeValueWithoutResponse === 'function')
+    return characteristic.writeValueWithoutResponse(bytes);
+  if (typeof characteristic.writeValue === 'function')
+    return characteristic.writeValue(bytes);
+  throw new Error('当前浏览器不支持蓝牙特征写入');
+}
+
 async function writeGattPayload(payload, withResponse) {
   const bytes = Uint8Array.from(payload);
 
   for (let retry = 0; retry < 8; retry++) {
     try {
-      if (withResponse)
-        await epdCharacteristic.writeValueWithResponse(bytes);
-      else
-        await epdCharacteristic.writeValueWithoutResponse(bytes);
+      await writeCharacteristicValue(epdCharacteristic, bytes, withResponse);
 
       if (!withResponse) await sleep(4);
       return;
@@ -1773,7 +1781,7 @@ function handleTgzNotification(event) {
 async function writeTgzFrame(frame, options = {}) {
   if (!epdCharacteristic) throw new Error('设备未连接');
   const fast = options.fast !== false &&
-    epdCharacteristic.properties.writeWithoutResponse &&
+    epdCharacteristic.properties?.writeWithoutResponse &&
     typeof epdCharacteristic.writeValueWithoutResponse === 'function';
   const sequenceStart = tgzTxSequence;
 
@@ -1787,11 +1795,11 @@ async function writeTgzFrame(frame, options = {}) {
           tgzNoResponseRemaining === 0 || index === packets.length - 1
         );
         if (fast && !forceResponse) {
-          await epdCharacteristic.writeValueWithoutResponse(packets[index]);
+          await writeCharacteristicValue(epdCharacteristic, packets[index], false);
           tgzNoResponseRemaining--;
           await sleep(TGZ_WRITE_PACING_MS);
         } else {
-          await epdCharacteristic.writeValueWithResponse(packets[index]);
+          await writeCharacteristicValue(epdCharacteristic, packets[index], true);
           tgzNoResponseRemaining = TGZ_WRITE_RESPONSE_INTERVAL;
         }
         written++;
