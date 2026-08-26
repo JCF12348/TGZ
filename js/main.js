@@ -1,5 +1,7 @@
 ﻿let bleDevice, gattServer;
 let epdService, epdCharacteristic, epdNotifyCharacteristic;
+let legacyEpdService, legacyEpdCharacteristic, legacyEpdNotifyCharacteristic;
+let nrfEpdService, nrfEpdCharacteristic, nrfEpdVersionCharacteristic;
 let startTime, msgIndex;
 let canvas, ctx, textDecoder;
 let paintManager, cropManager;
@@ -51,7 +53,12 @@ let tgzResponseWaiters = [];
 let tgzPanelId = 0;
 let tgzStorageAvailable = false;
 let tgzStorageFreeSlots = 0;
+let tgzTransferProgressFrame = null;
+let tgzTransferTargetProgress = 0;
 let tgzImageErrorResponse = null;
+let nativeNrfMtu = 20;
+let nativeNrfNoResponseRemaining = 20;
+let nativeNrfWaiters = [];
 
 const MAX_SLOT_IMAGE_SIZE = 1024 * 1024;
 const DEFAULT_SLOT_READ_RAW_CHUNK_SIZE = 256;
@@ -99,6 +106,9 @@ const DEFAULT_PAGE_BACKGROUND_SETTINGS = {
   mask: 0.22
 };
 
+const NRF_EPD_SERVICE_UUID = '62750001-d828-918d-fb46-b6c11c675aec';
+const NRF_EPD_CHARACTERISTIC_UUID = '62750002-d828-918d-fb46-b6c11c675aec';
+const NRF_EPD_VERSION_UUID = '62750003-d828-918d-fb46-b6c11c675aec';
 const EPD_SERVICE_UUID = '0000ffff-0000-1000-8000-00805f9b34fb';
 const EPD_WRITE_UUID = '0000ff01-0000-1000-8000-00805f9b34fb';
 const EPD_NOTIFY_UUID = '0000ff02-0000-1000-8000-00805f9b34fb';
@@ -108,6 +118,8 @@ const TGZ_RLE_CHUNK_SIZE = 1024;
 const TGZ_PACKET_LENGTHS = [244, 180, 120, 64, 20];
 const TGZ_WRITE_PACING_MS = 4;
 const TGZ_WRITE_RESPONSE_INTERVAL = 50;
+const NATIVE_NRF_WRITE_PACING_MS = 4;
+const NATIVE_NRF_WRITE_RESPONSE_INTERVAL = 20;
 const TGZ_PANEL_NAMES = {
   1: 'SE0398 A0',
   2: 'SE0398 New-A1',
@@ -229,6 +241,12 @@ function resetVariables(options = {}) {
   epdService = null;
   epdCharacteristic = null;
   epdNotifyCharacteristic = null;
+  legacyEpdService = null;
+  legacyEpdCharacteristic = null;
+  legacyEpdNotifyCharacteristic = null;
+  nrfEpdService = null;
+  nrfEpdCharacteristic = null;
+  nrfEpdVersionCharacteristic = null;
   firmwareVersion = { label: '未知', ledControl: false, directImagePrepare: false, outdated: true };
   msgIndex = 0;
   bleWriteChain = Promise.resolve();
@@ -255,6 +273,12 @@ function resetVariables(options = {}) {
   tgzStorageAvailable = false;
   tgzStorageFreeSlots = 0;
   tgzImageErrorResponse = null;
+  nativeNrfMtu = 20;
+  nativeNrfNoResponseRemaining = NATIVE_NRF_WRITE_RESPONSE_INTERVAL;
+  nativeNrfWaiters.splice(0).forEach(waiter => {
+    clearTimeout(waiter.timer);
+    waiter.reject(new Error('连接已重置'));
+  });
   slotStreamSupport = false;
   clockFontSupport = false;
   clockFontBusy = false;
@@ -315,6 +339,33 @@ async function writeTgzPacket(characteristic, packet, preferFast) {
   return false;
 }
 
+async function writeNativeNrfPayload(payload, preferFast = false) {
+  if (!nrfEpdCharacteristic) throw new Error('nRF 原生传输特征不可用');
+  const bytes = payload instanceof Uint8Array ? payload : Uint8Array.from(payload);
+
+  return queueBleWrite(async () => {
+    for (let retry = 0; retry < 8; retry++) {
+      try {
+        if (preferFast) {
+          try {
+            await writeCharacteristicValue(nrfEpdCharacteristic, bytes, false);
+            return true;
+          } catch (_) {
+            await writeCharacteristicValue(nrfEpdCharacteristic, bytes, true);
+            return false;
+          }
+        }
+        await writeCharacteristicValue(nrfEpdCharacteristic, bytes, true);
+        return false;
+      } catch (error) {
+        if (!isGattBusyError(error) || retry === 7) throw error;
+        await sleep(10 + retry * 10);
+      }
+    }
+    return false;
+  });
+}
+
 async function writeGattPayload(payload, withResponse) {
   const bytes = Uint8Array.from(payload);
 
@@ -361,7 +412,8 @@ async function write(cmd, data, withResponse = true) {
 }
 
 function isBleConnected() {
-  return gattServer != null && gattServer.connected && epdCharacteristic != null;
+  return gattServer != null && gattServer.connected &&
+    (nrfEpdCharacteristic != null || epdCharacteristic != null);
 }
 
 function formatSlotBytes(size) {
@@ -934,6 +986,7 @@ function renderSlotGrid(forceDisabled = imageTransferActive || slotActionPending
   if (!grid || !summary || !hint || !pagination) return;
 
   grid.replaceChildren();
+  grid.hidden = true;
   pagination.hidden = true;
   if (!isBleConnected()) {
     summary.textContent = '连接设备后读取槽位';
@@ -947,6 +1000,7 @@ function renderSlotGrid(forceDisabled = imageTransferActive || slotActionPending
     return;
   }
 
+  grid.hidden = false;
   let usedCount = 0;
   const pageEnd = slotState.pageStart + slotState.pageCount;
   for (let slot = slotState.pageStart; slot < pageEnd; slot++) {
@@ -987,6 +1041,7 @@ function renderSlotGrid(forceDisabled = imageTransferActive || slotActionPending
 
     const readControl = document.createElement('div');
     readControl.className = cached ? 'slot-read-control cached' : 'slot-read-control';
+    readControl.hidden = !slotStreamSupport;
     const readButton = document.createElement('button');
     readButton.type = 'button';
     readButton.className = 'secondary';
@@ -1038,7 +1093,32 @@ function renderSlotGrid(forceDisabled = imageTransferActive || slotActionPending
 async function refreshSlots(start = slotState.pageStart) {
   if (!isBleConnected()) return;
   addLog('正在读取图片槽位...');
-  await write(EpdCmd.GET_SLOTS, encodeUint32LE(Math.max(0, start)));
+  const normalizedStart = Math.max(0, start);
+  if (nrfEpdCharacteristic) {
+    const response = waitForNativeNrfMessage(message => {
+      const match = /^slots=\d+\s+(\d+)\s+/.exec(message.trim());
+      return match && parseInt(match[1], 10) === normalizedStart;
+    }, 8000, '图片槽位状态');
+    await writeNativeNrfPayload(new Uint8Array([
+      EpdCmd.GET_SLOTS,
+      ...encodeUint32LE(normalizedStart),
+    ]), false);
+    return response;
+  }
+  await write(EpdCmd.GET_SLOTS, encodeUint32LE(normalizedStart));
+}
+
+async function findFirstFreeNativeSlot() {
+  if (!nrfEpdCharacteristic || slotState.count === 0) return null;
+  const total = slotState.count;
+  for (let start = 0; start < total; start += SLOT_PAGE_SIZE) {
+    await refreshSlots(start);
+    for (let offset = 0; offset < slotState.pageCount; offset++) {
+      if ((slotState.usedMask & (1 << offset)) === 0)
+        return slotState.pageStart + offset;
+    }
+  }
+  return null;
 }
 
 async function changeSlotPage(direction) {
@@ -1069,6 +1149,7 @@ function applySlotsMessage(message) {
       flashSize,
       fingerprints: parts.slice(6, 6 + pageCount).map(normalizeSlotFingerprint)
     };
+    tgzStorageAvailable = count > 0;
   } else {
   slotProtocolV2 = false;
   let fingerprintStart = 2;
@@ -1090,6 +1171,7 @@ function applySlotsMessage(message) {
   };
   }
   loadSlotImageCache();
+  renderSlotGrid();
   const eraseAllCompleted = slotEraseAllPending && slotState.usedMask === 0;
   if (slotEraseAllPending && !eraseAllCompleted) {
     updateButtonStatus();
@@ -1126,7 +1208,13 @@ async function freeImageSlot(slot) {
   if (imageTransferActive || slotActionPending) return;
   if (!confirm(`确认删除槽位 ${slot + 1} 的图片？`)) return;
   setSlotActionPending(true);
-  if (await write(EpdCmd.FREE_SLOT, encodeSlotIndex(slot))) {
+  const sent = nrfEpdCharacteristic
+    ? await writeNativeNrfPayload(new Uint8Array([
+        EpdCmd.FREE_SLOT,
+        ...encodeUint32LE(slot),
+      ]), false).then(() => true, () => false)
+    : await write(EpdCmd.FREE_SLOT, encodeSlotIndex(slot));
+  if (sent) {
     removeSlotImageCache(slot);
     renderSlotGrid(true);
     addLog(`槽位 ${slot + 1} 删除命令已发送。`);
@@ -1144,7 +1232,13 @@ async function freeAllImageSlots() {
   const status = document.getElementById('slotReadStatus');
   status.hidden = false;
   status.textContent = '正在擦除全部图片槽位，请勿断开连接...';
-  if (await write(EpdCmd.FREE_SLOT, encodeSlotIndex(0xFFFFFFFF))) {
+  const sent = nrfEpdCharacteristic
+    ? await writeNativeNrfPayload(new Uint8Array([
+        EpdCmd.FREE_SLOT,
+        ...encodeUint32LE(0xFFFFFFFF),
+      ]), false).then(() => true, () => false)
+    : await write(EpdCmd.FREE_SLOT, encodeSlotIndex(0xFFFFFFFF));
+  if (sent) {
     addLog('全部图片槽位擦除命令已发送。');
   } else {
     slotEraseAllPending = false;
@@ -1156,7 +1250,13 @@ async function freeAllImageSlots() {
 async function displayImageSlot(slot) {
   if (imageTransferActive || slotActionPending) return;
   setSlotActionPending(true);
-  if (await write(EpdCmd.SET_SLOT, encodeSlotAction(1, slot))) {
+  const sent = nrfEpdCharacteristic
+    ? await writeNativeNrfPayload(new Uint8Array([
+        EpdCmd.SET_SLOT,
+        ...encodeNativeSlotAction(1, slot),
+      ]), false).then(() => true, () => false)
+    : await write(EpdCmd.SET_SLOT, encodeSlotAction(1, slot));
+  if (sent) {
     addLog(`已请求设备显示槽位 ${slot + 1}。`);
   } else {
     setSlotActionPending(false);
@@ -1794,11 +1894,48 @@ function handleTgzNotification(event) {
   }
 }
 
+function waitForNativeNrfMessage(predicate, timeoutMs, description) {
+  return new Promise((resolve, reject) => {
+    const waiter = {
+      predicate,
+      resolve,
+      reject,
+      timer: setTimeout(() => {
+        const index = nativeNrfWaiters.indexOf(waiter);
+        if (index >= 0) nativeNrfWaiters.splice(index, 1);
+        reject(new Error(`${description || 'nRF 设备响应'}超时`));
+      }, timeoutMs),
+    };
+    nativeNrfWaiters.push(waiter);
+  });
+}
+
+function dispatchNativeNrfMessage(message) {
+  for (let index = nativeNrfWaiters.length - 1; index >= 0; index--) {
+    const waiter = nativeNrfWaiters[index];
+    if (!waiter.predicate(message)) continue;
+    nativeNrfWaiters.splice(index, 1);
+    clearTimeout(waiter.timer);
+    waiter.resolve(message);
+  }
+}
+
+function handleNativeNrfNotification(event) {
+  const value = event.target.value;
+  const data = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  const message = new TextDecoder().decode(data).replace(/\0+$/, '');
+  applyNativePanelMessage(message);
+  dispatchNativeNrfMessage(message);
+  handleNotify(value, msgIndex++);
+}
+
 async function writeTgzFrame(frame, options = {}) {
-  if (!epdCharacteristic) throw new Error('设备未连接');
+  const characteristic = legacyEpdCharacteristic || epdCharacteristic;
+  if (!characteristic || characteristic === nrfEpdCharacteristic)
+    throw new Error('旧版 FFFF 控制通道不可用');
   let fast = options.fast !== false && tgzFastWriteEnabled &&
-    epdCharacteristic.properties?.writeWithoutResponse &&
-    typeof epdCharacteristic.writeValueWithoutResponse === 'function';
+    characteristic.properties?.writeWithoutResponse &&
+    typeof characteristic.writeValueWithoutResponse === 'function';
   const sequenceStart = tgzTxSequence;
 
   for (let candidate = tgzPacketLengthIndex; candidate < TGZ_PACKET_LENGTHS.length; candidate++) {
@@ -1811,7 +1948,7 @@ async function writeTgzFrame(frame, options = {}) {
           tgzNoResponseRemaining === 0 || index === packets.length - 1
         );
         const useFast = fast && !forceResponse;
-        const fastStillUsable = await writeTgzPacket(epdCharacteristic, packets[index], useFast);
+        const fastStillUsable = await writeTgzPacket(characteristic, packets[index], useFast);
         if (useFast && fastStillUsable) {
           tgzNoResponseRemaining--;
           await sleep(TGZ_WRITE_PACING_MS);
@@ -1871,8 +2008,7 @@ function applyTgzHandshake(response) {
     : '固件未声明 RLE 能力，使用原始传输');
 }
 
-function applyTgzPanelStatus(response) {
-  const panelId = response.body.length >= 2 ? response.body[1] : 0;
+function applyPanelId(panelId, transport = 'TGZ 离线 Web Bluetooth') {
   if (!TGZ_PANEL_NAMES[panelId]) throw new Error(`固件返回未知屏幕编号 ${panelId}`);
   tgzPanelId = panelId;
   const mode = panelId <= 2 ? 'fourColor' : 'sixColor';
@@ -1883,9 +2019,25 @@ function applyTgzPanelStatus(response) {
   updateCanvasSize({ reloadImage: false });
   updateDitcherOptions({ reloadImage: false });
   const label = `${TGZ_PANEL_NAMES[panelId]} · ${mode === 'fourColor' ? '四色' : '六色'}`;
-  document.getElementById('driverMeta').textContent = `${label} · TGZ 离线 Web Bluetooth`;
+  document.getElementById('driverMeta').textContent = `${label} · ${transport}`;
   addLog(`自动识别屏幕：${TGZ_PANEL_NAMES[panelId]}`);
   return panelId;
+}
+
+function applyTgzPanelStatus(response) {
+  const panelId = response.body.length >= 2 ? response.body[1] : 0;
+  return applyPanelId(panelId);
+}
+
+function applyNativePanelMessage(message) {
+  const panelMatch = /(?:^|\s)panel=(\d+)/.exec(message);
+  const mtuMatch = /(?:^|\s)mtu=(\d+)/.exec(message);
+  if (mtuMatch) {
+    nativeNrfMtu = Math.max(20, Math.min(247, parseInt(mtuMatch[1], 10)));
+    document.getElementById('mtusize').value = nativeNrfMtu;
+  }
+  if (message.includes('rle=1')) rleSupport = true;
+  return panelMatch ? applyPanelId(parseInt(panelMatch[1], 10), 'nRF 原生 BLE') : 0;
 }
 
 async function identifyTgzPanel() {
@@ -1949,6 +2101,14 @@ async function eraseTgzStorage() {
   } finally {
     updateButtonStatus();
   }
+}
+
+async function refreshStorage() {
+  return nrfEpdCharacteristic ? refreshSlots(0) : refreshTgzStorage();
+}
+
+async function eraseStorage() {
+  return nrfEpdCharacteristic ? freeAllImageSlots() : eraseTgzStorage();
 }
 
 async function setDriver(options = {}) {
@@ -2309,6 +2469,88 @@ function set2bppPixel(data, width, x, y, value) {
   data[byteIndex] = (data[byteIndex] & ~(0x03 << shift)) | ((value & 0x03) << shift);
 }
 
+function encodeNativeSlotAction(action, slot) {
+  const payload = new Uint8Array(5);
+  payload[0] = action & 0xff;
+  payload.set(encodeUint32LE(slot >>> 0), 1);
+  return payload;
+}
+
+async function prepareNativeNrfTransfer(store, slot, refreshAfterSave) {
+  const requested = store ? slot : 0xFFFFFFFF;
+  const ready = waitForNativeNrfMessage(
+    message => message === 'ready=1' || message.startsWith('slot_error='),
+    95000,
+    store ? '槽位擦除准备' : '直接显示准备'
+  );
+  await writeNativeNrfPayload(new Uint8Array([
+    EpdCmd.SET_SLOT,
+    ...encodeNativeSlotAction(0, requested),
+  ]), false);
+  const response = await ready;
+  if (response !== 'ready=1') throw new Error(`槽位准备失败：${response}`);
+
+  if (store) {
+    await writeNativeNrfPayload(new Uint8Array([
+      EpdCmd.SET_SLOT,
+      ...encodeNativeSlotAction(refreshAfterSave ? 3 : 2, slot),
+    ]), false);
+  }
+}
+
+async function writeNativeNrfImage(packedPixels, mode) {
+  const raw = packedPixels instanceof Uint8Array
+    ? packedPixels
+    : new Uint8Array(packedPixels);
+  const encoded = rleEncode(raw);
+  const useRle = rleSupport && encoded.length < raw.length;
+  const transfer = useRle ? encoded : raw;
+  const chunkSize = Math.max(18, Math.min(245, nativeNrfMtu - 2));
+  const packetCount = Math.ceil(transfer.length / chunkSize);
+  const receipt = waitForNativeNrfMessage(
+    message => message === 'image=received' ||
+      message.startsWith('image_error=') || message.startsWith('slot_error='),
+    45000,
+    '图片完整接收确认'
+  );
+
+  addLog(useRle
+    ? `nRF RLE 压缩：${raw.length} -> ${transfer.length} 字节 (${(transfer.length * 100 / raw.length).toFixed(1)}%)`
+    : `nRF 原始传输：${raw.length} 字节`);
+  addLog(`开始发送：${mode === 'fourColor' ? '四色' : '六色'}，${packetCount} 个 ATT 分包`);
+  const startedAt = performance.now();
+
+  for (let index = 0; index < packetCount; index++) {
+    const chunk = transfer.slice(index * chunkSize, (index + 1) * chunkSize);
+    const flags = (index === 0 ? 0x02 : 0x00) | (useRle ? 0x04 : 0x00);
+    const packet = new Uint8Array(2 + chunk.length);
+    packet[0] = EpdCmd.WRITE_IMG;
+    packet[1] = flags;
+    packet.set(chunk, 2);
+
+    const preferFast = nativeNrfNoResponseRemaining > 0;
+    const fastUsed = await writeNativeNrfPayload(packet, preferFast);
+    if (preferFast && fastUsed) {
+      nativeNrfNoResponseRemaining--;
+      await sleep(NATIVE_NRF_WRITE_PACING_MS);
+    } else {
+      nativeNrfNoResponseRemaining = NATIVE_NRF_WRITE_RESPONSE_INTERVAL;
+    }
+
+    const exactProgress = Math.min(99, (index + 1) * 100 / packetCount);
+    const percent = Math.floor(exactProgress);
+    setStatus(`正在传输 ${percent}% · ${index + 1}/${packetCount}`);
+    updateTgzTransferOverlay(exactProgress);
+  }
+
+  updateTgzTransferOverlay(100);
+  setStatus('图片数据已发送，设备正在写入 Flash...');
+  addLog(`${packetCount} 个 ATT 分包已写入 BLE，用时 ${((performance.now() - startedAt) / 1000).toFixed(1)} 秒`);
+  const response = await receipt;
+  if (response !== 'image=received') throw new Error(`设备拒绝图像：${response}`);
+  addLog(`设备已完整接收图片，总用时 ${((performance.now() - startedAt) / 1000).toFixed(1)} 秒`);
+}
+
 
 function mapGDEM037F51Color(value) {
   return value & 0x03;
@@ -2392,9 +2634,10 @@ async function writeTgzImage(imageData, mode) {
       fast: true,
       onPacket(completed, total) {
         const frameProgress = index + completed / total;
-        const percent = Math.min(99, Math.floor(frameProgress / transfer.requests.length * 99));
+        const exactProgress = Math.min(99, frameProgress / transfer.requests.length * 99);
+        const percent = Math.floor(exactProgress);
         setStatus(`正在传输 ${percent}% · ${index + 1}/${transfer.requests.length}`);
-        updateTgzTransferOverlay(percent);
+        updateTgzTransferOverlay(exactProgress);
       },
     });
     if (tgzImageErrorResponse) {
@@ -2412,6 +2655,53 @@ async function writeTgzImage(imageData, mode) {
   addLog(`设备已完整接收图片，总用时 ${((performance.now() - startedAt) / 1000).toFixed(1)} 秒`);
 }
 
+async function sendimgNative(options = {}) {
+  if (cropManager) cropManager.commitPendingTransform(false);
+  if (canvas.width !== TGZ_WIDTH || canvas.height !== TGZ_HEIGHT)
+    throw new Error(`TGZ 固件只接受 ${TGZ_WIDTH}×${TGZ_HEIGHT} 画布`);
+
+  const mode = tgzPanelId <= 2 ? 'fourColor' : 'sixColor';
+  document.getElementById('ditherMode').value = mode;
+  const processedData = processCanvasImageData();
+  const finalImageData = decodeProcessedData(processedData, canvas.width, canvas.height, mode);
+  const packedPixels = MemobusClient.packOfficialPalettePixels(finalImageData, mode, {
+    mirrorHorizontal: true,
+  });
+  const requestedSlot = Number.isInteger(options.slot) ? options.slot : null;
+  const storeRequested = requestedSlot != null || document.getElementById('slotRefreshAfterSave').checked;
+  const targetSlot = requestedSlot != null
+    ? requestedSlot
+    : (storeRequested ? await findFirstFreeNativeSlot() : null);
+  if (storeRequested && targetSlot == null)
+    throw new Error('外置 Flash 容量已满，已拒绝继续保存');
+
+  const refreshAfterSave = storeRequested && options.refreshAfterSave === true;
+  if (storeRequested) cacheCurrentSlotPreview(targetSlot, processedData, mode);
+  await prepareNativeNrfTransfer(storeRequested, targetSlot, refreshAfterSave);
+  const ready = !storeRequested || refreshAfterSave
+    ? waitForNativeNrfMessage(message => message === 'ready=1' || message.startsWith('display_error='),
+      95000, '屏幕刷新完成')
+    : null;
+  await writeNativeNrfImage(packedPixels, mode);
+
+  if (storeRequested) {
+    await refreshSlots(Math.floor(targetSlot / SLOT_PAGE_SIZE) * SLOT_PAGE_SIZE);
+    if (refreshAfterSave) {
+      const response = await ready;
+      if (response !== 'ready=1') throw new Error(`屏幕刷新失败：${response}`);
+      setStatus(`槽位 ${targetSlot + 1} 已保存并刷新。`);
+    } else {
+      setStatus(`图片已保存到槽位 ${targetSlot + 1}，可用设备按键切换。`);
+    }
+  } else {
+    setStatus('传输完成，屏幕刷新中...');
+    const response = await ready;
+    if (response !== 'ready=1') throw new Error(`屏幕刷新失败：${response}`);
+    setStatus('屏幕刷新完成。');
+  }
+  return true;
+}
+
 async function sendimg(options = {}) {
   if (!isBleConnected() || imageTransferActive) return false;
   if (cropManager) cropManager.commitPendingTransform(false);
@@ -2425,6 +2715,12 @@ async function sendimg(options = {}) {
   updateButtonStatus();
   showTgzTransferOverlay();
   try {
+    if (nrfEpdCharacteristic) {
+      const result = await sendimgNative(options);
+      await sleep(500);
+      hideTgzTransferOverlay();
+      return result;
+    }
     const mode = tgzPanelId <= 2 ? 'fourColor' : 'sixColor';
     document.getElementById('ditherMode').value = mode;
     const processedData = processCanvasImageData();
@@ -2610,21 +2906,15 @@ function downloadDataArray() {
   URL.revokeObjectURL(link.href);
 }
 
-function updateButtonStatus(forceDisabled = imageTransferActive || slotActionPending || slotReadState !== null || otaBusy || clockFontBusy) {
+function updateButtonStatus(forceDisabled = imageTransferActive || slotActionPending || slotReadState !== null || otaBusy) {
   const connected = gattServer != null && gattServer.connected;
   const canReconnect = bleDevice != null && bleDevice.gatt && !bleDevice.gatt.connected;
   const disabled = forceDisabled || !connected;
   document.getElementById("connectbutton").disabled = otaBusy;
   document.getElementById("reconnectbutton").disabled = otaBusy || reconnectActive || forceDisabled || !canReconnect;
-  document.getElementById("sendcmdbutton").disabled = true;
-  document.getElementById("calendarmodebutton").disabled = true;
-  document.getElementById("clockmodebutton").disabled = true;
-  document.getElementById("clearscreenbutton").disabled = true;
   document.getElementById("sendimgbutton").disabled = disabled || tgzPanelId === 0;
-  const calendarStyleSend = document.getElementById("calendarStyleSend");
-  if (calendarStyleSend) calendarStyleSend.disabled = true;
-  document.getElementById("setDriverbutton").disabled = disabled;
-  document.getElementById("epddriver").disabled = disabled;
+  document.getElementById("setDriverbutton").disabled = disabled || !legacyEpdCharacteristic;
+  document.getElementById("epddriver").disabled = disabled || !legacyEpdCharacteristic;
   document.getElementById("ledEnabled").disabled = true;
   const ledColorDisabled = true;
   document.getElementById('ledTransferChase').disabled = ledColorDisabled;
@@ -2640,8 +2930,6 @@ function updateButtonStatus(forceDisabled = imageTransferActive || slotActionPen
   document.getElementById("startSlotSlideButton").disabled = true;
   document.getElementById("randomSlotSlideButton").disabled = true;
   document.getElementById("stopSlotSlideButton").disabled = true;
-  document.getElementById('clockFontUploadButton').disabled = true;
-  document.getElementById('clockFontEraseButton').disabled = true;
   document.getElementById('otaPanelToggle').disabled = true;
 }
 
@@ -2728,10 +3016,11 @@ async function preConnect() {
       addLog("正在扫描墨水屏蓝牙设备...");
       bleDevice = await navigator.bluetooth.requestDevice({
         filters: [
+          { services: [NRF_EPD_SERVICE_UUID] },
           { services: [EPD_SERVICE_UUID] },
           { namePrefix: 'Lenmory' }
         ],
-        optionalServices: [EPD_SERVICE_UUID]
+        optionalServices: [NRF_EPD_SERVICE_UUID, EPD_SERVICE_UUID]
       });
     } catch (e) {
       console.error(e);
@@ -2804,6 +3093,7 @@ function handleDisplayError(code) {
     scheduleDeviceInitRetry();
     return;
   }
+
   const busyTimeout = code === 'busy_timeout';
   const message = busyTimeout
     ? '屏幕 BUSY 等待超时，当前驱动可能与屏幕不匹配。请切换对应屏幕驱动后重试，蓝牙连接将保持。'
@@ -2898,25 +3188,16 @@ function handleNotify(value, idx) {
         status.textContent = errorMessage;
         addLog(errorMessage);
       }
-    } else if (msg.startsWith('font=')) {
-      const enabled = msg.startsWith('font=1');
-      const format = clockFontVersion >= 2 ? '高清 V2 40 × 80' : '兼容 V1 32 × 80';
-      setClockFontStatus(enabled ? `设备正在使用自定义时钟字体（${format}）。` : `设备正在使用默认七段时钟字体（${format}）。`);
-    } else if (msg.startsWith('font_error=')) {
-      setClockFontStatus(`字体操作失败：${msg.substring('font_error='.length)}`);
-      clockFontBusy = false;
-      updateButtonStatus();
+    } else if (msg.startsWith('font=') || msg.startsWith('font_error=')) {
+      // The picture-only host intentionally ignores the removed clock module.
     } else if (msg.startsWith('mtu=') && msg.length > 4) {
       const mtuParts = msg.substring(4).trim().split(/\s+/);
       const mtuSize = parseInt(mtuParts[0], 10);
       rleSupport = mtuParts.includes('rle=1');
       slotStreamSupport = mtuParts.includes('slot_stream=1');
-      clockFontSupport = mtuParts.includes('clock_font=1');
-      if (clockFontSupport) setClockFontFormat(mtuParts.includes('cf2=1') ? 2 : 1);
       document.getElementById('mtusize').value = mtuSize;
       addLog(`MTU 已更新为: ${mtuSize}`);
       if (rleSupport) addLog('设备已启用 RLE 压缩传输。');
-      if (clockFontSupport) void queryClockFont();
     } else if (msg.startsWith('t=') && msg.length > 2) {
       const t = parseInt(msg.substring(2)) + new Date().getTimezoneOffset() * 60;
       addLog(`远端时间: ${new Date(t * 1000).toLocaleString()}`);
@@ -2926,17 +3207,47 @@ function handleNotify(value, idx) {
 }
 
 async function connect() {
-  if (bleDevice == null || epdCharacteristic != null) return false;
+  if (bleDevice == null || nrfEpdCharacteristic != null || epdCharacteristic != null) return false;
 
   try {
     addLog("正在连接: " + bleDevice.name);
     gattServer = await bleDevice.gatt.connect();
     addLog('  找到 GATT Server');
-    epdService = await gattServer.getPrimaryService(EPD_SERVICE_UUID);
-    addLog('  找到 EPD Service');
-    epdCharacteristic = await epdService.getCharacteristic(EPD_WRITE_UUID);
-    epdNotifyCharacteristic = await epdService.getCharacteristic(EPD_NOTIFY_UUID);
-    addLog('  找到 FF01 写入与 FF02 通知特征');
+
+    try {
+      nrfEpdService = await gattServer.getPrimaryService(NRF_EPD_SERVICE_UUID);
+      nrfEpdCharacteristic = await nrfEpdService.getCharacteristic(NRF_EPD_CHARACTERISTIC_UUID);
+      try {
+        nrfEpdVersionCharacteristic = await nrfEpdService.getCharacteristic(NRF_EPD_VERSION_UUID);
+      } catch (_) {
+        nrfEpdVersionCharacteristic = null;
+      }
+      addLog('  找到 6275 nRF 原生传图服务');
+    } catch (nativeError) {
+      nrfEpdService = null;
+      nrfEpdCharacteristic = null;
+      nrfEpdVersionCharacteristic = null;
+      addLog('  当前固件未提供 6275 原生服务，尝试 FFFF 兼容通道');
+    }
+
+    try {
+      legacyEpdService = await gattServer.getPrimaryService(EPD_SERVICE_UUID);
+      legacyEpdCharacteristic = await legacyEpdService.getCharacteristic(EPD_WRITE_UUID);
+      legacyEpdNotifyCharacteristic = await legacyEpdService.getCharacteristic(EPD_NOTIFY_UUID);
+      addLog('  找到 FFFF 官方 App 兼容服务');
+    } catch (legacyError) {
+      legacyEpdService = null;
+      legacyEpdCharacteristic = null;
+      legacyEpdNotifyCharacteristic = null;
+      if (!nrfEpdCharacteristic) throw legacyError;
+      addLog('  未找到 FFFF 兼容服务，继续使用 nRF 原生服务');
+    }
+
+    if (!nrfEpdCharacteristic && !legacyEpdCharacteristic)
+      throw new Error('设备未提供可用的 EPD 蓝牙服务');
+    epdService = legacyEpdService || nrfEpdService;
+    epdCharacteristic = legacyEpdCharacteristic || nrfEpdCharacteristic;
+    epdNotifyCharacteristic = legacyEpdNotifyCharacteristic || nrfEpdCharacteristic;
   } catch (e) {
     console.error(e);
     if (e.message) addLog("connect: " + e.message);
@@ -2946,21 +3257,52 @@ async function connect() {
   }
 
   try {
-    tgzRx = new MemobusClient.BlufiReassembler();
-    tgzTxSequence = 0;
-    tgzNoResponseRemaining = TGZ_WRITE_RESPONSE_INTERVAL;
-    await epdNotifyCharacteristic.startNotifications();
-    epdNotifyCharacteristic.addEventListener('characteristicvaluechanged', handleTgzNotification);
+    if (nrfEpdCharacteristic) {
+      nrfEpdCharacteristic.addEventListener('characteristicvaluechanged', handleNativeNrfNotification);
+      await nrfEpdCharacteristic.startNotifications();
+      addLog('  已启用 nRF 原生通知');
+    }
+    if (legacyEpdNotifyCharacteristic) {
+      tgzRx = new MemobusClient.BlufiReassembler();
+      tgzTxSequence = 0;
+      tgzNoResponseRemaining = TGZ_WRITE_RESPONSE_INTERVAL;
+      legacyEpdNotifyCharacteristic.addEventListener('characteristicvaluechanged', handleTgzNotification);
+      await legacyEpdNotifyCharacteristic.startNotifications();
+      addLog('  已启用 FFFF 兼容通知');
+    }
   } catch (e) {
     console.error(e);
     if (e.message) addLog("startNotifications: " + e.message);
+    if (bleDevice.gatt.connected) bleDevice.gatt.disconnect();
+    finishDisconnect('通知启用失败。');
+    return false;
   }
 
   try {
-    const handshake = await requestTgz(0x01, 0x05, null, 10000, '设备握手');
-    applyTgzHandshake(handshake);
-    await identifyTgzPanel();
-    await refreshTgzStorage();
+    if (nrfEpdCharacteristic) {
+      if (nrfEpdVersionCharacteristic) {
+        try {
+          firmwareVersion = parseFirmwareVersion(await nrfEpdVersionCharacteristic.readValue());
+          addLog(`固件版本: ${firmwareVersion.label}`);
+        } catch (_) {
+          addLog('固件版本特征暂不可读，继续初始化。');
+        }
+      }
+      const panelMessage = waitForNativeNrfMessage(
+        message => /(?:^|\s)panel=\d+/.test(message),
+        15000,
+        'nRF 屏幕识别'
+      );
+      await writeNativeNrfPayload(new Uint8Array([EpdCmd.INIT]), false);
+      applyNativePanelMessage(await panelMessage);
+      await refreshSlots(0);
+      addLog('已启用 nRF 原生快速传图与图片槽功能。');
+    } else {
+      const handshake = await requestTgz(0x01, 0x05, null, 10000, '设备握手');
+      applyTgzHandshake(handshake);
+      await identifyTgzPanel();
+      await refreshTgzStorage();
+    }
   } catch (initError) {
     addLog(`设备初始化失败：${initError.message || initError}`);
     if (bleDevice.gatt.connected) bleDevice.gatt.disconnect();
@@ -3030,7 +3372,6 @@ function cloneImageData(imageData) {
 function resetDitherPreviewSource() {
   ditherSourceImageData = null;
   ditherPreviewActive = false;
-  calendarStyleImageActive = false;
 }
 
 function setCanvasTitle(title) {
@@ -3088,7 +3429,6 @@ function updateCanvasSize(options = {}) {
   const sizeChanged = canvas.width !== selectedSize.width || canvas.height !== selectedSize.height;
 
   if (!sizeChanged && options.reloadImage === false) {
-    scheduleCalendarStylePreview();
     return;
   }
 
@@ -3097,37 +3437,44 @@ function updateCanvasSize(options = {}) {
   canvas.height = selectedSize.height;
 
   if (options.reloadImage !== false) updateImage();
-  scheduleCalendarStylePreview();
+}
+
+function prepareTgzTransferPreview() {
+  const preview = document.getElementById('tgzTransferPreview');
+  const previewContext = preview.getContext('2d');
+  previewContext.fillStyle = '#f1f1f1';
+  previewContext.fillRect(0, 0, preview.width, preview.height);
+  if (canvas) previewContext.drawImage(canvas, 0, 0, preview.width, preview.height);
+  preview.style.clipPath = 'inset(0 0 100% 0)';
 }
 
 function showTgzTransferOverlay() {
   const overlay = document.getElementById('tgzTransferOverlay');
+  prepareTgzTransferPreview();
   overlay.hidden = false;
   updateTgzTransferOverlay(0);
 }
 
 function updateTgzTransferOverlay(progress) {
-  const normalized = Math.max(0, Math.min(100, Math.round(progress)));
-  const preview = document.getElementById('tgzTransferPreview');
-  const previewContext = preview.getContext('2d');
-  const revealHeight = Math.round(preview.height * normalized / 100);
-  previewContext.fillStyle = '#f1f1f1';
-  previewContext.fillRect(0, 0, preview.width, preview.height);
-  if (revealHeight > 0 && canvas) {
-    previewContext.save();
-    previewContext.beginPath();
-    previewContext.rect(0, 0, preview.width, revealHeight);
-    previewContext.clip();
-    previewContext.drawImage(canvas, 0, 0, preview.width, preview.height);
-    previewContext.restore();
-  }
-  document.getElementById('tgzTransferTitle').textContent = normalized < 100
-    ? `正在传输 ${normalized}%`
-    : '传输完成，屏幕刷新中';
-  document.getElementById('tgzTransferBar').style.width = `${normalized}%`;
+  tgzTransferTargetProgress = Math.max(0, Math.min(100, Number(progress) || 0));
+  if (tgzTransferProgressFrame != null) return;
+  tgzTransferProgressFrame = requestAnimationFrame(() => {
+    const normalized = tgzTransferTargetProgress;
+    const visiblePercent = Math.floor(normalized);
+    document.getElementById('tgzTransferPreview').style.clipPath =
+      `inset(0 0 ${100 - normalized}% 0)`;
+    document.getElementById('tgzTransferTitle').textContent = normalized < 100
+      ? `正在传输 ${visiblePercent}%`
+      : '传输完成，屏幕刷新中';
+    document.getElementById('tgzTransferBar').style.width = `${normalized}%`;
+    tgzTransferProgressFrame = null;
+  });
 }
 
 function hideTgzTransferOverlay() {
+  if (tgzTransferProgressFrame != null) cancelAnimationFrame(tgzTransferProgressFrame);
+  tgzTransferProgressFrame = null;
+  tgzTransferTargetProgress = 0;
   document.getElementById('tgzTransferOverlay').hidden = true;
 }
 
@@ -3151,7 +3498,14 @@ function configureTgzUi() {
   document.getElementById('slotRefreshAfterSave').addEventListener('change', async event => {
     if (!isBleConnected()) return;
     try {
-      await setTgzTransferMode(event.target.checked);
+      if (nrfEpdCharacteristic) {
+        if (event.target.checked && !tgzStorageAvailable)
+          throw new Error('未识别到可用外置 Flash');
+        if (!event.target.checked)
+          await prepareNativeNrfTransfer(false, 0xFFFFFFFF, false);
+      } else {
+        await setTgzTransferMode(event.target.checked);
+      }
       addLog(event.target.checked ? '传图模式：保存到外置 Flash' : '传图模式：直接显示');
     } catch (error) {
       event.target.checked = false;
@@ -3209,7 +3563,8 @@ function getDitherSettings() {
     saturation: parseFloat(document.getElementById('ditherSaturation').value),
     alg: document.getElementById('ditherAlg').value,
     strength: parseFloat(document.getElementById('ditherStrength').value),
-    mode: document.getElementById('ditherMode').value
+    mode: document.getElementById('ditherMode').value,
+    filter: document.getElementById('tgzFilter')?.value || 'none'
   };
 }
 
@@ -3227,8 +3582,7 @@ function processCanvasImageData() {
     ditherSourceImageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
   }
   const sourceImageData = cloneImageData(ditherSourceImageData);
-  if (calendarStyleImageActive) return processImageData(sourceImageData, settings.mode);
-  const imageData = prepareDitherImageData(sourceImageData);
+  const imageData = applyTgzFilter(prepareDitherImageData(sourceImageData), settings.filter);
   return processImageData(ditherImage(imageData, settings.alg, settings.strength, settings.mode, settings), settings.mode);
 }
 
@@ -4302,7 +4656,6 @@ document.body.onload = () => {
   paintManager.initPaintTools();
   cropManager.initCropTools();
   initEventHandlers();
-  initClockFontCanvas();
   window.addEventListener('pagehide', disconnectDeviceOnPageExit);
   window.addEventListener('beforeunload', disconnectDeviceOnPageExit);
   disconnectStaleBleConnections();
@@ -4312,7 +4665,7 @@ document.body.onload = () => {
   loadGlassClarity();
   loadPageBackgroundSettings();
   loadPageBackground();
-  addLog('TGZ-52811 离线上位机 v20260826.6；图片和滤镜均只在本机处理');
+  addLog('TGZ-52811 离线上位机 v20260826.10；图片和滤镜均只在本机处理');
 }
 
 
