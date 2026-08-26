@@ -2924,13 +2924,15 @@ function updateButtonStatus(forceDisabled = imageTransferActive || slotActionPen
     control.disabled = ledColorDisabled;
   });
   if (ledColorDisabled) closeLedColorPopover();
-  document.getElementById('slotRefreshAfterSave').disabled = disabled || !tgzStorageAvailable;
+  const storageAvailable = nrfEpdCharacteristic ? slotState.count > 0 : tgzStorageAvailable;
+  document.getElementById('slotRefreshAfterSave').disabled = disabled || !storageAvailable;
   document.getElementById("refreshSlotsButton").disabled = disabled;
-  document.getElementById("eraseAllSlotsButton").disabled = disabled || !tgzStorageAvailable;
+  document.getElementById("eraseAllSlotsButton").disabled = disabled || !storageAvailable;
   document.getElementById("startSlotSlideButton").disabled = true;
   document.getElementById("randomSlotSlideButton").disabled = true;
   document.getElementById("stopSlotSlideButton").disabled = true;
   document.getElementById('otaPanelToggle').disabled = true;
+  renderSlotGrid(disabled);
 }
 
 function finishDisconnect(message = '已断开连接.') {
@@ -3499,10 +3501,8 @@ function configureTgzUi() {
     if (!isBleConnected()) return;
     try {
       if (nrfEpdCharacteristic) {
-        if (event.target.checked && !tgzStorageAvailable)
+        if (event.target.checked && slotState.count === 0)
           throw new Error('未识别到可用外置 Flash');
-        if (!event.target.checked)
-          await prepareNativeNrfTransfer(false, 0xFFFFFFFF, false);
       } else {
         await setTgzTransferMode(event.target.checked);
       }
@@ -4665,7 +4665,7 @@ document.body.onload = () => {
   loadGlassClarity();
   loadPageBackgroundSettings();
   loadPageBackground();
-  addLog('TGZ-52811 离线上位机 v20260826.10；图片和滤镜均只在本机处理');
+  addLog('TGZ-52811 离线上位机 v20260826.11；图片和滤镜均只在本机处理');
 }
 
 
