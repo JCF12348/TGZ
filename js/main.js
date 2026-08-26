@@ -4632,7 +4632,7 @@ document.body.onload = () => {
   loadGlassClarity();
   loadPageBackgroundSettings();
   loadPageBackground();
-  addLog('TGZ-52811 离线上位机 v20260826.12；图片和滤镜均只在本机处理');
+  addLog('TGZ-52811 离线上位机 v20260826.13；图片和滤镜均只在本机处理');
 }
 
 
