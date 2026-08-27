@@ -47,7 +47,7 @@ let ledColorWriteTimer = null;
 let tgzRx = null;
 let tgzTxSequence = 0;
 let tgzPacketLengthIndex = 0;
-let tgzNoResponseRemaining = 50;
+let tgzNoResponseRemaining = 20;
 let tgzFastWriteEnabled = true;
 let tgzResponseWaiters = [];
 let tgzPanelId = 0;
@@ -116,7 +116,7 @@ const TGZ_HEIGHT = 528;
 const TGZ_RLE_CHUNK_SIZE = 1024;
 const TGZ_PACKET_LENGTHS = [244, 180, 120, 64, 20];
 const TGZ_WRITE_PACING_MS = 4;
-const TGZ_WRITE_RESPONSE_INTERVAL = 50;
+const TGZ_WRITE_RESPONSE_INTERVAL = 20;
 const NATIVE_NRF_WRITE_PACING_MS = 4;
 const NATIVE_NRF_WRITE_RESPONSE_INTERVAL = 20;
 const TGZ_PANEL_NAMES = {
@@ -2076,11 +2076,42 @@ function applyTgzStorageInfo(body) {
 }
 
 async function refreshTgzStorage() {
-  try {
-    await requestTgz(0x02, 0x19, null, 10000, '读取 Flash 容量');
-  } catch (error) {
-    addLog(error.message || String(error));
+  const summary = document.getElementById('slotSummary');
+  const hint = document.getElementById('slotHint');
+  summary.textContent = '正在读取外置 Flash...';
+  hint.textContent = '正在等待设备返回容量与图片槽状态';
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const response = await requestTgz(0x02, 0x19, null, 6000, '读取 Flash 容量');
+      if (response.body.length < 30) {
+        throw new Error(`Flash 容量响应不完整（${response.body.length}/30 字节）`);
+      }
+      applyTgzStorageInfo(response.body);
+      if (tgzStorageAvailable) {
+        const jedec = Array.from(response.body.slice(4, 7))
+          .map(value => value.toString(16).padStart(2, '0').toUpperCase())
+          .join(' ');
+        addLog(`外置 Flash 已识别：JEDEC ${jedec}，${formatSlotBytes(readTgzLe32(response.body, 8))}`);
+      } else {
+        addLog('设备返回：外置 Flash 当前不可用。');
+      }
+      return true;
+    } catch (error) {
+      lastError = error;
+      if (attempt < 3) {
+        addLog(`Flash 状态第 ${attempt} 次读取失败，正在重试：${error.message || error}`);
+        await sleep(300 * attempt);
+      }
+    }
   }
+
+  summary.textContent = 'Flash 状态读取失败';
+  hint.textContent = '未收到容量响应，请点“刷新容量”重试';
+  addLog(`Flash 状态读取失败：${lastError?.message || lastError}`);
+  updateButtonStatus();
+  return false;
 }
 
 async function setTgzTransferMode(store) {
@@ -3186,6 +3217,7 @@ async function connect() {
     gattServer = await bleDevice.gatt.connect();
     addLog('  找到 GATT Server');
 
+    let nativeDiscoveryError = null;
     try {
       nrfEpdService = await gattServer.getPrimaryService(NRF_EPD_SERVICE_UUID);
       nrfEpdCharacteristic = await nrfEpdService.getCharacteristic(NRF_EPD_CHARACTERISTIC_UUID);
@@ -3199,7 +3231,9 @@ async function connect() {
       nrfEpdService = null;
       nrfEpdCharacteristic = null;
       nrfEpdVersionCharacteristic = null;
-      addLog('  当前固件未提供 6275 原生服务，尝试 FFFF 兼容通道');
+      nativeDiscoveryError = nativeError;
+      addLog(`  6275 首次发现失败：${nativeError.message || nativeError}`);
+      addLog('  尝试 FFFF 兼容通道');
     }
 
     try {
@@ -3213,6 +3247,25 @@ async function connect() {
       legacyEpdNotifyCharacteristic = null;
       if (!nrfEpdCharacteristic) throw legacyError;
       addLog('  未找到 FFFF 兼容服务，继续使用 nRF 原生服务');
+    }
+
+    if (!nrfEpdCharacteristic && legacyEpdService) {
+      await sleep(300);
+      try {
+        nrfEpdService = await gattServer.getPrimaryService(NRF_EPD_SERVICE_UUID);
+        nrfEpdCharacteristic = await nrfEpdService.getCharacteristic(NRF_EPD_CHARACTERISTIC_UUID);
+        try {
+          nrfEpdVersionCharacteristic = await nrfEpdService.getCharacteristic(NRF_EPD_VERSION_UUID);
+        } catch (_) {
+          nrfEpdVersionCharacteristic = null;
+        }
+        addLog('  重试后找到 6275 nRF 原生传图服务');
+      } catch (retryError) {
+        nrfEpdService = null;
+        nrfEpdCharacteristic = null;
+        nrfEpdVersionCharacteristic = null;
+        addLog(`  浏览器本次未发现 6275，使用 FFFF 兼容通道：${retryError.message || nativeDiscoveryError?.message || retryError}`);
+      }
     }
 
     if (!nrfEpdCharacteristic && !legacyEpdCharacteristic)
@@ -4635,7 +4688,7 @@ document.body.onload = () => {
   loadGlassClarity();
   loadPageBackgroundSettings();
   loadPageBackground();
-  addLog('TGZ-52811 离线上位机 v20260827.1；图片和滤镜均只在本机处理');
+  addLog('TGZ-52811 离线上位机 v20260827.3；图片和滤镜均只在本机处理');
 }
 
 
