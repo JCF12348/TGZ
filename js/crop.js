@@ -1,5 +1,5 @@
 class CropManager {
-  constructor(canvas, ctx, paintManager = null) {
+  constructor(canvas, ctx, paintManager = null, options = {}) {
     this.canvas = canvas;
     this.ctx = ctx;
     this.paintManager = paintManager;
@@ -19,6 +19,7 @@ class CropManager {
     this.animationFrame = 0;
     this.commitTimer = 0;
     this.interactiveDirty = false;
+    this.officialPaperScale = Number(options.officialPaperScale) || 0;
 
     this.handleMouseDown = this.handleMouseDown.bind(this);
     this.handleMouseMove = this.handleMouseMove.bind(this);
@@ -27,6 +28,33 @@ class CropManager {
     this.handleTouchStart = this.handleTouchStart.bind(this);
     this.handleTouchMove = this.handleTouchMove.bind(this);
     this.handleTouchEnd = this.handleTouchEnd.bind(this);
+  }
+
+  getCropViewport() {
+    if (!(this.officialPaperScale > 0)) {
+      return {
+        width: this.canvas.width,
+        height: this.canvas.height,
+        stretchX: 1,
+        stretchY: 1
+      };
+    }
+
+    // The App crops a portrait frame at 100 / scale, then rotates it to landscape.
+    const aspectRatio = this.officialPaperScale / 100;
+    const canvasAspectRatio = this.canvas.width / this.canvas.height;
+    const width = aspectRatio <= canvasAspectRatio
+      ? this.canvas.height * aspectRatio
+      : this.canvas.width;
+    const height = aspectRatio <= canvasAspectRatio
+      ? this.canvas.height
+      : this.canvas.width / aspectRatio;
+    return {
+      width,
+      height,
+      stretchX: this.canvas.width / width,
+      stretchY: this.canvas.height / height
+    };
   }
 
   setRenderCallback(callback) {
@@ -121,13 +149,14 @@ class CropManager {
 
   resetTransform(commitHistory = true) {
     if (!this.originalImage) return false;
+    const viewport = this.getCropViewport();
     this.imageScale = Math.min(
       this.maxScale,
       Math.max(
         this.minScale,
         Math.max(
-          this.canvas.width / this.originalImage.width,
-          this.canvas.height / this.originalImage.height
+          viewport.width / this.originalImage.width,
+          viewport.height / this.originalImage.height
         )
       )
     );
@@ -164,6 +193,8 @@ class CropManager {
     this.ctx.fillStyle = '#ffffff';
     this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
     this.ctx.translate(this.canvas.width / 2, this.canvas.height / 2);
+    const viewport = this.getCropViewport();
+    this.ctx.scale(viewport.stretchX, viewport.stretchY);
     this.ctx.rotate(this.currentRotation * Math.PI / 180);
     const width = this.originalImage.width * this.imageScale;
     const height = this.originalImage.height * this.imageScale;
@@ -216,8 +247,11 @@ class CropManager {
 
   getCanvasDelta(deltaX, deltaY) {
     const rect = this.canvas.getBoundingClientRect();
-    const scaledX = rect.width > 0 ? deltaX * this.canvas.width / rect.width : deltaX;
-    const scaledY = rect.height > 0 ? deltaY * this.canvas.height / rect.height : deltaY;
+    const viewport = this.getCropViewport();
+    const scaledX = (rect.width > 0 ? deltaX * this.canvas.width / rect.width : deltaX) /
+      viewport.stretchX;
+    const scaledY = (rect.height > 0 ? deltaY * this.canvas.height / rect.height : deltaY) /
+      viewport.stretchY;
     const radians = this.currentRotation * Math.PI / 180;
     return {
       x: scaledX * Math.cos(radians) + scaledY * Math.sin(radians),

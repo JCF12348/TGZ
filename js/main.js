@@ -3032,7 +3032,7 @@ function updateButtonStatus(forceDisabled = imageTransferActive || slotActionPen
   document.getElementById("startSlotSlideButton").disabled = true;
   document.getElementById("randomSlotSlideButton").disabled = true;
   document.getElementById("stopSlotSlideButton").disabled = true;
-  document.getElementById('otaPanelToggle').disabled = true;
+  updateOtaControls();
   renderSlotGrid(disabled);
 }
 
@@ -3119,11 +3119,9 @@ async function preConnect() {
       addLog("正在扫描墨水屏蓝牙设备...");
       bleDevice = await navigator.bluetooth.requestDevice({
         filters: [
-          { services: [NRF_EPD_SERVICE_UUID] },
-          { services: [EPD_SERVICE_UUID] },
-          { namePrefix: 'Lenmory' }
+          { namePrefix: 'Lenmory_52811' }
         ],
-        optionalServices: [NRF_EPD_SERVICE_UUID, EPD_SERVICE_UUID]
+        optionalServices: [NRF_EPD_SERVICE_UUID, EPD_SERVICE_UUID, SecureDfu.DFU_SERVICE_UUID]
       });
     } catch (e) {
       console.error(e);
@@ -3147,7 +3145,7 @@ async function reConnect() {
   try {
     if (bleDevice == null && navigator.bluetooth && typeof navigator.bluetooth.getDevices === 'function') {
       const devices = await navigator.bluetooth.getDevices();
-      bleDevice = devices.find(device => device && (device.name || '').startsWith('Lenmory')) || null;
+      bleDevice = devices.find(device => device && (device.name || '').startsWith('Lenmory_52811')) || null;
     }
 
     if (bleDevice == null) {
@@ -4776,7 +4774,7 @@ document.body.onload = () => {
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
   paintManager = new PaintManager(canvas, ctx);
-  cropManager = new CropManager(canvas, ctx, paintManager);
+  cropManager = new CropManager(canvas, ctx, paintManager, { officialPaperScale: 133 });
   cropManager.setRenderCallback(renderTransformedImagePreview);
   if (paintManager.setBaseImageData) paintManager.setBaseImageData();
 
@@ -4792,7 +4790,7 @@ document.body.onload = () => {
   loadGlassClarity();
   loadPageBackgroundSettings();
   loadPageBackground();
-  addLog('TGZ-52811 v20260827.9；图片和滤镜均只在本机处理');
+  addLog('TGZ-52811 v20260827.10；图片和滤镜均只在本机处理');
 }
 
 
