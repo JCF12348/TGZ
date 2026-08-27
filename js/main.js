@@ -52,7 +52,9 @@ let tgzFastWriteEnabled = true;
 let tgzResponseWaiters = [];
 let tgzPanelId = 0;
 let tgzStorageAvailable = false;
+let tgzStorageUsedSlots = 0;
 let tgzStorageFreeSlots = 0;
+let tgzStorageRemainingBytes = 0;
 let tgzTransferProgressFrame = null;
 let tgzTransferTargetProgress = 0;
 let tgzImageErrorResponse = null;
@@ -270,7 +272,9 @@ function resetVariables(options = {}) {
   });
   tgzPanelId = 0;
   tgzStorageAvailable = false;
+  tgzStorageUsedSlots = 0;
   tgzStorageFreeSlots = 0;
+  tgzStorageRemainingBytes = 0;
   tgzImageErrorResponse = null;
   nativeNrfMtu = 20;
   nativeNrfWaiters.splice(0).forEach(waiter => {
@@ -995,6 +999,12 @@ function renderSlotGrid(forceDisabled = imageTransferActive || slotActionPending
   if (slotState.count === 0) {
     summary.textContent = '未识别到外置 Flash';
     hint.textContent = '请检查 Flash 供电及 P0.12 至 P0.15 连线';
+    return;
+  }
+
+  if (!nrfEpdCharacteristic && tgzStorageAvailable) {
+    summary.textContent = `外置 Flash ${formatSlotBytes(slotState.flashSize)} · 已用 ${tgzStorageUsedSlots}/${slotState.count} · 可存 ${tgzStorageFreeSlots} 张`;
+    hint.textContent = `剩余 ${formatSlotBytes(tgzStorageRemainingBytes)}；保存模式下容量满会拒绝继续写入`;
     return;
   }
 
@@ -2063,8 +2073,11 @@ function applyTgzStorageInfo(body) {
   const used = readTgzLe16(body, 18);
   const free = readTgzLe16(body, 20);
   const remaining = readTgzLe32(body, 22);
+  tgzStorageUsedSlots = used;
   tgzStorageFreeSlots = free;
+  tgzStorageRemainingBytes = remaining;
   slotState.count = total;
+  slotState.flashSize = capacity;
   document.getElementById('slotRefreshAfterSave').checked = storeMode;
   document.getElementById('slotSummary').textContent = tgzStorageAvailable
     ? `外置 Flash ${formatSlotBytes(capacity)} · 已用 ${used}/${total} · 可存 ${free} 张`
@@ -4688,7 +4701,7 @@ document.body.onload = () => {
   loadGlassClarity();
   loadPageBackgroundSettings();
   loadPageBackground();
-  addLog('TGZ-52811 离线上位机 v20260827.3；图片和滤镜均只在本机处理');
+  addLog('TGZ-52811 离线上位机 v20260827.4；图片和滤镜均只在本机处理');
 }
 
 
