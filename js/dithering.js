@@ -1137,7 +1137,6 @@ function esp32DitherImage(
 function ditherImage(imageData, alg, strength, mode, adjustments = {}) {
   if (alg === 'tgzAuto') {
     if (mode === 'fourColor' || mode === 'sixColor') {
-      applyEsp32Adjustments(imageData, adjustments);
       return tgzAutoDither(imageData, mode);
     }
     // The recovered App path only defines four/six-color behavior.
