@@ -27,9 +27,7 @@ const TGZ_FILTERS = Object.freeze([
   ['redTriTone', '黑白红'],
   ['yellowTriTone', '黑白黄'],
   ['pureRedBlack', '红色调'],
-  ['pureYellowBlack', '黄色调'],
-  // Present in FilterRegistry although the editor's visible 26-item list omits it.
-  ['color', '彩色']
+  ['pureYellowBlack', '黄色调']
 ]);
 
 const tgzFilterTextureCache = new Map();
@@ -75,6 +73,43 @@ function tgzFilterSaturate(r, g, b, amount) {
   ];
 }
 
+function tgzOfficialAdjustSaturation(r, g, b, increment = 15) {
+  const maximum = Math.max(r, g, b);
+  const minimum = Math.min(r, g, b);
+  const delta = maximum - minimum;
+  const sum = maximum + minimum;
+  if (delta === 0) return [r, g, b];
+
+  const lightness = Math.floor(sum / 2);
+  const saturation = lightness < 128
+    ? Math.trunc(delta * 100 / sum)
+    : Math.trunc(delta * 100 / (510 - sum));
+
+  if (increment > 0) {
+    const divisor = increment + saturation > 100 ? saturation : 100 - increment;
+    const factor = 10000 / divisor - 100;
+    return [r, g, b].map(channel => Math.round(channel + (channel - lightness) * factor / 100));
+  }
+
+  const factor = 100 + increment;
+  return [r, g, b].map(channel => Math.round(lightness + (channel - lightness) * factor / 100));
+}
+
+function tgzPreprocessOfficial(imageData) {
+  const lut = globalThis.TGZ_PREPROCESS_LUT;
+  if (!(lut instanceof Uint8Array) || lut.length !== 256) {
+    throw new Error('TGZ 官方预处理曲线未加载');
+  }
+  return tgzFilterMap(imageData, (r, g, b) => {
+    const saturated = tgzOfficialAdjustSaturation(r, g, b, 15);
+    return [
+      lut[tgzFilterClamp(saturated[0])],
+      lut[tgzFilterClamp(saturated[1])],
+      lut[tgzFilterClamp(saturated[2])]
+    ];
+  });
+}
+
 function tgzFilterBasic(imageData, settings) {
   const brightness = settings.brightness ?? 1;
   const contrast = settings.contrast ?? 1;
@@ -115,9 +150,10 @@ function tgzFilterDuotone(imageData, dark, light) {
 function tgzFilterTriTone(imageData, dark, middle, light) {
   return tgzFilterMap(imageData, (r, g, b) => {
     const amount = tgzFilterLuma(r, g, b) / 255;
-    const start = amount < 0.5 ? dark : middle;
-    const end = amount < 0.5 ? middle : light;
-    const mix = amount < 0.5 ? amount * 2 : (amount - 0.5) * 2;
+    if (amount >= 2 / 3) return light;
+    const start = amount < 1 / 3 ? dark : middle;
+    const end = amount < 1 / 3 ? middle : light;
+    const mix = amount < 1 / 3 ? amount * 3 : (amount - 1 / 3) * 3;
     return [
       start[0] + (end[0] - start[0]) * mix,
       start[1] + (end[1] - start[1]) * mix,
@@ -245,11 +281,8 @@ function tgzApplyPencil(imageData, keepColor) {
   });
 }
 
-function tgzNoise(pixel, seed) {
-  let value = (pixel + 1) ^ seed;
-  value = Math.imul(value ^ (value >>> 16), 0x45d9f3b);
-  value = Math.imul(value ^ (value >>> 16), 0x45d9f3b);
-  return ((value ^ (value >>> 16)) >>> 0) / 0xffffffff;
+function tgzNoise() {
+  return Math.random();
 }
 
 function tgzApplyIPhone4(imageData) {
@@ -334,7 +367,6 @@ function tgzApplyFilmNoir(imageData, keepColor) {
 const tgzFilterImplementations = Object.freeze({
   none: tgzFilterClone,
   outdoor: tgzFilterClone,
-  color: imageData => tgzFilterBasic(imageData, { saturation: 1.15 }),
   contrastWarm: tgzApplyContrastWarm,
   amberFilm: tgzApplyCubeLut,
   grayscale: tgzFilterGrayscale,
@@ -368,8 +400,20 @@ const tgzFilterImplementations = Object.freeze({
 });
 
 function applyTgzFilter(imageData, filterId) {
+  if (filterId === 'none') return tgzFilterClone(imageData);
   const implementation = tgzFilterImplementations[filterId] || tgzFilterImplementations.none;
-  return implementation(imageData);
+  return implementation(tgzPreprocessOfficial(imageData));
+}
+
+function updateTgzOfficialFilterAvailability(mode) {
+  if (typeof document === 'undefined') return;
+  const select = document.getElementById('tgzFilter');
+  if (!select) return;
+  const outdoorOption = Array.from(select.options).find(option => option.value === 'outdoor');
+  if (!outdoorOption) return;
+  outdoorOption.disabled = mode !== 'sixColor';
+  outdoorOption.hidden = mode !== 'sixColor';
+  if (outdoorOption.disabled && select.value === 'outdoor') select.value = 'none';
 }
 
 function preloadTgzFilterTextures() {
@@ -395,7 +439,9 @@ preloadTgzFilterTextures();
 
 globalThis.TGZ_FILTERS = TGZ_FILTERS;
 globalThis.applyTgzFilter = applyTgzFilter;
+globalThis.tgzPreprocessOfficial = tgzPreprocessOfficial;
+globalThis.updateTgzOfficialFilterAvailability = updateTgzOfficialFilterAvailability;
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { TGZ_FILTERS, applyTgzFilter };
+  module.exports = { TGZ_FILTERS, applyTgzFilter, tgzPreprocessOfficial };
 }

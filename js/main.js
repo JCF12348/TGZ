@@ -61,6 +61,7 @@ let tgzImageErrorResponse = null;
 let nativeNrfMtu = 20;
 let nativeNrfWaiters = [];
 let nativeImageTransferError = null;
+let nativeImageFlowSupport = false;
 
 const MAX_SLOT_IMAGE_SIZE = 1024 * 1024;
 const DEFAULT_SLOT_READ_RAW_CHUNK_SIZE = 256;
@@ -279,6 +280,7 @@ function resetVariables(options = {}) {
   tgzImageErrorResponse = null;
   nativeNrfMtu = 20;
   nativeImageTransferError = null;
+  nativeImageFlowSupport = false;
   nativeNrfWaiters.splice(0).forEach(waiter => {
     clearTimeout(waiter.timer);
     waiter.reject(new Error('连接已重置'));
@@ -1830,19 +1832,37 @@ async function writeImage(data, step = 'bw', waitForPrepare = false, commandWrit
     const currentTime = (new Date().getTime() - startTime) / 1000.0;
     setStatus(`${stepName}块: ${chunkIdx + 1}/${count}, 总用时: ${currentTime}s`);
 
-    const cfg = rleSupport
+    let cfg = rleSupport
       ? (step === 'bw' ? 0 : 1) | (chunkIdx === 0 ? 2 : 0) | (useRle ? 4 : 0)
       : (step === 'bw' ? 0x0F : 0x00) | (chunkIdx === 0 ? 0x00 : 0xF0);
+    const requestFlow = commandWriter === writeNativeNrfCommand && useRle &&
+      nativeImageFlowSupport && (chunkIdx + 1) % 4 === 0 && chunkIdx + 1 < count;
+    let flowPromise = null;
+    if (requestFlow) {
+      cfg |= 0x08;
+      flowPromise = waitForNativeNrfMessage(
+        message => message === 'image=flow' || message.startsWith('image_error='),
+        15000,
+        'Flash 写入确认'
+      );
+      flowPromise.catch(() => {});
+    }
     const payload = [
       cfg,
       ...chunk,
     ];
+    let wrote;
     if (noReplyCount > 0) {
-      if (!await commandWriter(EpdCmd.WRITE_IMG, payload, false)) return false;
+      wrote = await commandWriter(EpdCmd.WRITE_IMG, payload, false);
       noReplyCount--;
     } else {
-      if (!await commandWriter(EpdCmd.WRITE_IMG, payload, true)) return false;
+      wrote = await commandWriter(EpdCmd.WRITE_IMG, payload, true);
       noReplyCount = interleavedCount;
+    }
+    if (!wrote) return false;
+    if (flowPromise) {
+      const response = await flowPromise;
+      if (response.startsWith('image_error=')) throw new Error(response);
     }
     if (commandWriter === writeNativeNrfCommand && nativeImageTransferError) {
       throw new Error(nativeImageTransferError);
@@ -2045,6 +2065,7 @@ function applyPanelId(panelId, transport = 'Web Bluetooth') {
   const driverSelect = document.getElementById('epddriver');
   driverSelect.value = String(panelId);
   document.getElementById('ditherMode').value = mode;
+  updateTgzOfficialFilterAvailability(mode);
   document.getElementById('canvasSize').value = 'TGZ_760_528';
   updateCanvasSize({ reloadImage: false });
   updateDitcherOptions({ reloadImage: false });
@@ -2067,6 +2088,7 @@ function applyNativePanelMessage(message) {
     document.getElementById('mtusize').value = nativeNrfMtu;
   }
   if (message.includes('rle=1')) rleSupport = true;
+  if (message.includes('flow=1')) nativeImageFlowSupport = true;
   return panelMatch ? applyPanelId(parseInt(panelMatch[1], 10), 'nRF 原生 BLE') : 0;
 }
 
@@ -4703,10 +4725,12 @@ function initEventHandlers() {
     saveGlassClarity(e.target.value);
   });
   document.getElementById("ditherMode").addEventListener("change", () => {
+    updateTgzOfficialFilterAvailability(document.getElementById('ditherMode').value);
     if (paintManager && typeof paintManager.refreshMatterTemplatePalette === 'function') {
       paintManager.refreshMatterTemplatePalette();
     }
   });
+  updateTgzOfficialFilterAvailability(document.getElementById('ditherMode').value);
   document.getElementById("ditherStrength").addEventListener("input", (e) => {
     document.getElementById("ditherStrengthValue").innerText = parseFloat(e.target.value).toFixed(1);
     applyDither();
@@ -4768,7 +4792,7 @@ document.body.onload = () => {
   loadGlassClarity();
   loadPageBackgroundSettings();
   loadPageBackground();
-  addLog('TGZ-52811 v20260827.8；图片和滤镜均只在本机处理');
+  addLog('TGZ-52811 v20260827.9；图片和滤镜均只在本机处理');
 }
 
 
