@@ -47,7 +47,7 @@ let ledColorWriteTimer = null;
 let tgzRx = null;
 let tgzTxSequence = 0;
 let tgzPacketLengthIndex = 0;
-let tgzNoResponseRemaining = 20;
+let tgzNoResponseRemaining = 4;
 let tgzFastWriteEnabled = true;
 let tgzResponseWaiters = [];
 let tgzPanelId = 0;
@@ -119,7 +119,7 @@ const TGZ_HEIGHT = 528;
 const TGZ_RLE_CHUNK_SIZE = 1024;
 const TGZ_PACKET_LENGTHS = [180, 120, 64, 20];
 const TGZ_WRITE_PACING_MS = 4;
-const TGZ_WRITE_RESPONSE_INTERVAL = 20;
+const TGZ_WRITE_RESPONSE_INTERVAL = 4;
 const NATIVE_NRF_WRITE_PACING_MS = 4;
 const NATIVE_NRF_WRITE_RESPONSE_INTERVAL = 4;
 const TGZ_PANEL_NAMES = {
@@ -4768,7 +4768,7 @@ document.body.onload = () => {
   loadGlassClarity();
   loadPageBackgroundSettings();
   loadPageBackground();
-  addLog('TGZ-52811 v20260827.7；图片和滤镜均只在本机处理');
+  addLog('TGZ-52811 v20260827.8；图片和滤镜均只在本机处理');
 }
 
 
