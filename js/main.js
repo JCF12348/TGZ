@@ -60,6 +60,7 @@ let tgzTransferTargetProgress = 0;
 let tgzImageErrorResponse = null;
 let nativeNrfMtu = 20;
 let nativeNrfWaiters = [];
+let nativeImageTransferError = null;
 
 const MAX_SLOT_IMAGE_SIZE = 1024 * 1024;
 const DEFAULT_SLOT_READ_RAW_CHUNK_SIZE = 256;
@@ -120,7 +121,7 @@ const TGZ_PACKET_LENGTHS = [180, 120, 64, 20];
 const TGZ_WRITE_PACING_MS = 4;
 const TGZ_WRITE_RESPONSE_INTERVAL = 20;
 const NATIVE_NRF_WRITE_PACING_MS = 4;
-const NATIVE_NRF_WRITE_RESPONSE_INTERVAL = 20;
+const NATIVE_NRF_WRITE_RESPONSE_INTERVAL = 4;
 const TGZ_PANEL_NAMES = {
   1: 'SE0398 A0',
   2: 'SE0398 New-A1',
@@ -277,6 +278,7 @@ function resetVariables(options = {}) {
   tgzStorageRemainingBytes = 0;
   tgzImageErrorResponse = null;
   nativeNrfMtu = 20;
+  nativeImageTransferError = null;
   nativeNrfWaiters.splice(0).forEach(waiter => {
     clearTimeout(waiter.timer);
     waiter.reject(new Error('连接已重置'));
@@ -743,19 +745,25 @@ function rleEncode(data, maxLiteral = 128) {
   return new Uint8Array(output);
 }
 
-function rleEncodeChunks(data, chunkSize) {
+function rleEncodeChunks(data, chunkSize, maxDecodedSize = Infinity) {
   const encoded = rleEncode(data, Math.min(chunkSize - 1, 128));
   const chunks = [];
   let tokenOffset = 0;
   let chunkOffset = 0;
+  let chunkDecodedSize = 0;
 
   while (tokenOffset < encoded.length) {
     const token = encoded[tokenOffset];
     const tokenSize = (token & 0x80) !== 0 ? 2 : token + 2;
-    if (tokenOffset - chunkOffset + tokenSize > chunkSize && tokenOffset > chunkOffset) {
+    const tokenDecodedSize = (token & 0x80) !== 0 ? (token & 0x7F) + 3 : token + 1;
+    if (tokenOffset > chunkOffset &&
+      (tokenOffset - chunkOffset + tokenSize > chunkSize ||
+       chunkDecodedSize + tokenDecodedSize > maxDecodedSize)) {
       chunks.push(encoded.slice(chunkOffset, tokenOffset));
       chunkOffset = tokenOffset;
+      chunkDecodedSize = 0;
     }
+    chunkDecodedSize += tokenDecodedSize;
     tokenOffset += tokenSize;
   }
   if (tokenOffset > chunkOffset) chunks.push(encoded.slice(chunkOffset, tokenOffset));
@@ -1787,7 +1795,10 @@ async function writeImage(data, step = 'bw', waitForPrepare = false, commandWrit
   }
 
   const rawData = data instanceof Uint8Array ? data : new Uint8Array(data);
-  const rleChunks = rleSupport && chunkSize >= 2 ? rleEncodeChunks(rawData, chunkSize) : [];
+  const nativeRleDecodedLimit = commandWriter === writeNativeNrfCommand ? 1024 : Infinity;
+  const rleChunks = rleSupport && chunkSize >= 2
+    ? rleEncodeChunks(rawData, chunkSize, nativeRleDecodedLimit)
+    : [];
   const compressedSize = rleChunks.reduce((total, chunk) => total + chunk.length, 0);
   const useRle = rleSupport && compressedSize > 0 && compressedSize < rawData.length;
   const count = useRle ? rleChunks.length : Math.ceil(rawData.length / chunkSize);
@@ -1825,6 +1836,9 @@ async function writeImage(data, step = 'bw', waitForPrepare = false, commandWrit
     } else {
       if (!await commandWriter(EpdCmd.WRITE_IMG, payload, true)) return false;
       noReplyCount = interleavedCount;
+    }
+    if (commandWriter === writeNativeNrfCommand && nativeImageTransferError) {
+      throw new Error(nativeImageTransferError);
     }
 
     if (chunkIdx === 0 && preparePromise && !await preparePromise) return false;
@@ -2663,11 +2677,32 @@ async function sendimgNative(options = {}) {
   const refreshAfterSave = options.refreshAfterSave ??
     document.getElementById('slotRefreshAfterSave').checked;
   cacheCurrentSlotPreview(targetSlot, processedData, mode);
+  const prepareResponse = waitForNativeNrfMessage(
+    message => message === 'ready=1' || message.startsWith('slot_error='),
+    20000,
+    '槽位准备完成'
+  );
   if (!await writeNativeNrfCommand(
     EpdCmd.SET_SLOT,
     encodeNativeSlotAction(0, targetSlot),
     true
   )) throw new Error('槽位写入准备失败');
+  const prepared = await prepareResponse;
+  if (prepared !== 'ready=1') throw new Error(prepared);
+
+  if (!await writeNativeNrfCommand(
+    EpdCmd.SET_SLOT,
+    encodeNativeSlotAction(refreshAfterSave ? 3 : 2, targetSlot),
+    true
+  )) throw new Error('保存模式设置失败');
+
+  nativeImageTransferError = null;
+  const completion = waitForNativeNrfMessage(
+    message => message === 'ready=1' || message.startsWith('image_error=') ||
+      message.startsWith('display_error=') || message.startsWith('slot_error='),
+    95000,
+    '槽位保存完成'
+  );
 
   const transferOk = await writeImage(
     packedPixels,
@@ -2681,19 +2716,6 @@ async function sendimgNative(options = {}) {
     }
   );
   if (!transferOk) throw new Error('图片分包发送失败');
-
-  const completion = waitForNativeNrfMessage(
-    message => message === 'ready=1' ||
-      message.startsWith('display_error=') || message.startsWith('slot_error='),
-    95000,
-    '槽位保存完成'
-  );
-  const completionSent = await writeNativeNrfCommand(
-    EpdCmd.SET_SLOT,
-    encodeNativeSlotAction(refreshAfterSave ? 3 : 2, targetSlot),
-    true
-  );
-  if (!completionSent) throw new Error('槽位提交失败');
   setStatus(refreshAfterSave ? '图片已保存，屏幕刷新中...' : '图片已发送，正在保存槽位...');
   const response = await completion;
   if (response !== 'ready=1') throw new Error(response);
@@ -3183,6 +3205,9 @@ function handleNotify(value, idx) {
       addLog('开始接收槽位图片。');
     } else if (beginSlotChunk(msg)) {
       // The next notification contains the binary chunk.
+    } else if (msg.startsWith('image_error=')) {
+      nativeImageTransferError = msg;
+      setStatus(`传输失败：${msg}`);
     } else if (msg.startsWith('display_error=')) {
       handleDisplayError(msg.substring('display_error='.length));
     } else if (msg.startsWith('slot_error=')) {
