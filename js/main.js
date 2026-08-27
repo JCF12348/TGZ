@@ -118,6 +118,7 @@ const TGZ_PACKET_LENGTHS = [244, 180, 120, 64, 20];
 const TGZ_WRITE_PACING_MS = 4;
 const TGZ_WRITE_RESPONSE_INTERVAL = 50;
 const NATIVE_NRF_WRITE_PACING_MS = 4;
+const NATIVE_NRF_WRITE_RESPONSE_INTERVAL = 20;
 const TGZ_PANEL_NAMES = {
   1: 'SE0398 A0',
   2: 'SE0398 New-A1',
@@ -1766,7 +1767,9 @@ function finishSlotImageRead() {
 
 async function writeImage(data, step = 'bw', waitForPrepare = false, commandWriter = write, onProgress = null) {
   const chunkSize = parseInt(document.getElementById('mtusize').value, 10) - 2;
-  const interleavedCount = parseInt(document.getElementById('interleavedcount').value, 10);
+  const interleavedCount = commandWriter === writeNativeNrfCommand
+    ? NATIVE_NRF_WRITE_RESPONSE_INTERVAL
+    : parseInt(document.getElementById('interleavedcount').value, 10);
 
   if (chunkSize <= 0) {
     addLog('MTU error, please reconnect the device.');
@@ -4632,7 +4635,7 @@ document.body.onload = () => {
   loadGlassClarity();
   loadPageBackgroundSettings();
   loadPageBackground();
-  addLog('TGZ-52811 离线上位机 v20260826.13；图片和滤镜均只在本机处理');
+  addLog('TGZ-52811 离线上位机 v20260827.1；图片和滤镜均只在本机处理');
 }
 
 
