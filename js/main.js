@@ -116,7 +116,7 @@ const EPD_NOTIFY_UUID = '0000ff02-0000-1000-8000-00805f9b34fb';
 const TGZ_WIDTH = 760;
 const TGZ_HEIGHT = 528;
 const TGZ_RLE_CHUNK_SIZE = 1024;
-const TGZ_PACKET_LENGTHS = [244, 180, 120, 64, 20];
+const TGZ_PACKET_LENGTHS = [180, 120, 64, 20];
 const TGZ_WRITE_PACING_MS = 4;
 const TGZ_WRITE_RESPONSE_INTERVAL = 20;
 const NATIVE_NRF_WRITE_PACING_MS = 4;
@@ -1955,9 +1955,7 @@ async function writeTgzFrame(frame, options = {}) {
     let written = 0;
     try {
       for (let index = 0; index < packets.length; index++) {
-        const forceResponse = fast && (
-          tgzNoResponseRemaining === 0 || index === packets.length - 1
-        );
+        const forceResponse = fast && tgzNoResponseRemaining === 0;
         const useFast = fast && !forceResponse;
         const fastStillUsable = await writeTgzPacket(characteristic, packets[index], useFast);
         if (useFast && fastStillUsable) {
@@ -1997,7 +1995,7 @@ async function requestTgz(group, fn, body = null, timeoutMs = 10000, description
     timeoutMs,
     description
   );
-  await writeTgzFrame(MemobusClient.encodeMemobusRequest(group, fn, 0, body));
+  await writeTgzFrame(MemobusClient.encodeMemobusRequest(group, fn, 0, body), { fast: false });
   const response = await responsePromise;
   if (response.status !== 0) throw new Error(`${description}失败，状态 ${response.status}`);
   return response;
@@ -4701,7 +4699,7 @@ document.body.onload = () => {
   loadGlassClarity();
   loadPageBackgroundSettings();
   loadPageBackground();
-  addLog('TGZ-52811 离线上位机 v20260827.4；图片和滤镜均只在本机处理');
+  addLog('TGZ-52811 离线上位机 v20260827.5；图片和滤镜均只在本机处理');
 }
 
 
