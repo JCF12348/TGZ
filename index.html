@@ -4,7 +4,7 @@
 <head>
 	<meta charset="utf-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1">
-	<title>TGZ-52811 离线传图上位机</title>
+	<title>TGZ-52811</title>
 	<link rel="shortcut icon" type="image/png" href="favicon.png">
 	<link rel="stylesheet" href="css/main.css?v=2026082610">
 </head>
@@ -12,7 +12,7 @@
 <body>
 	<nav class="global-nav" aria-label="全局导航">
 		<div class="global-nav-inner">
-			<a class="global-brand" href="#">TGZ-52811 离线传图上位机</a>
+			<a class="global-brand" href="#">TGZ-52811</a>
 			<a href="#bluetooth-panel">蓝牙</a>
 			<a href="#slot-panel">图库</a>
 			<a href="#image-panel">传图</a>
@@ -20,7 +20,7 @@
 	</nav>
 	<div class="sub-nav-frosted">
 		<div class="sub-nav-inner">
-			<span id="driverMeta" class="sub-nav-meta">等待自动识别屏幕 · 离线 Web Bluetooth</span>
+			<span id="driverMeta" class="sub-nav-meta">等待自动识别屏幕</span>
 		</div>
 	</div>
 	<div class="main">
@@ -127,8 +127,8 @@
 				</div>
 				<div class="slot-toolbar-actions">
 					<label class="slot-save-refresh" for="slotRefreshAfterSave">
-						<input id="slotRefreshAfterSave" type="checkbox">
-						<span>保存到外置 Flash</span>
+						<input id="slotRefreshAfterSave" type="checkbox" checked>
+						<span>传图后刷新屏幕</span>
 					</label>
 					<button id="refreshSlotsButton" type="button" class="secondary" onclick="refreshStorage()" disabled>读取容量</button>
 					<button id="eraseAllSlotsButton" type="button" class="secondary slot-delete" onclick="eraseStorage()" disabled>擦除 Flash</button>
@@ -494,7 +494,7 @@
 				</span>
 			</span>
 			<span class="links"><a href="?debug=true" id="debug-toggle">开发模式</a></span>
-			<span class="copy">TGZ-52811 离线版 · 所有图片与滤镜均在本机处理</span>
+			<span class="copy">所有图片与滤镜均在本机处理</span>
 		</div>
 	</div>
 	<div id="backgroundSettingsModal" class="modal-overlay" hidden>
@@ -562,7 +562,7 @@
 	<script type="text/javascript" src="js/crop.js?v=2026072302"></script>
 	<script type="text/javascript" src="js/secure-dfu.js?v=2026072703"></script>
 	<script type="text/javascript" src="js/memobus-client.js?v=2026082606"></script>
-	<script type="text/javascript" src="js/main.js?v=2026082705"></script>
+	<script type="text/javascript" src="js/main.js?v=2026082706"></script>
 </body>
 
 </html>

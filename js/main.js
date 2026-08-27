@@ -2017,7 +2017,7 @@ function applyTgzHandshake(response) {
     : '固件未声明 RLE 能力，使用原始传输');
 }
 
-function applyPanelId(panelId, transport = 'TGZ 离线 Web Bluetooth') {
+function applyPanelId(panelId, transport = 'Web Bluetooth') {
   if (!TGZ_PANEL_NAMES[panelId]) throw new Error(`固件返回未知屏幕编号 ${panelId}`);
   tgzPanelId = panelId;
   const mode = panelId <= 2 ? 'fourColor' : 'sixColor';
@@ -2065,7 +2065,7 @@ function readTgzLe32(data, offset) {
 function applyTgzStorageInfo(body) {
   if (body.length < 30) return;
   tgzStorageAvailable = (body[1] & 0x01) !== 0;
-  const storeMode = (body[1] & 0x02) !== 0;
+  const refreshAfterSave = (body[1] & 0x02) !== 0;
   const capacity = readTgzLe32(body, 8);
   const total = readTgzLe16(body, 16);
   const used = readTgzLe16(body, 18);
@@ -2076,13 +2076,13 @@ function applyTgzStorageInfo(body) {
   tgzStorageRemainingBytes = remaining;
   slotState.count = total;
   slotState.flashSize = capacity;
-  document.getElementById('slotRefreshAfterSave').checked = storeMode;
+  document.getElementById('slotRefreshAfterSave').checked = refreshAfterSave;
   document.getElementById('slotSummary').textContent = tgzStorageAvailable
     ? `外置 Flash ${formatSlotBytes(capacity)} · 已用 ${used}/${total} · 可存 ${free} 张`
     : '未识别到外置 Flash';
   document.getElementById('slotHint').textContent = tgzStorageAvailable
-    ? `剩余 ${formatSlotBytes(remaining)}；保存模式下容量满会拒绝继续写入`
-    : '直接显示仍可使用，保存模式不可用';
+    ? `剩余 ${formatSlotBytes(remaining)}；容量满后会拒绝继续写入`
+    : '未识别到外置 Flash，无法传图';
   updateButtonStatus();
 }
 
@@ -2125,9 +2125,9 @@ async function refreshTgzStorage() {
   return false;
 }
 
-async function setTgzTransferMode(store) {
-  if (store && !tgzStorageAvailable) throw new Error('未识别到可用外置 Flash');
-  const response = await requestTgz(0x02, 0x1a, [store ? 1 : 0], 10000, '切换传图模式');
+async function setTgzTransferMode(refreshAfterSave) {
+  if (!tgzStorageAvailable) throw new Error('未识别到可用外置 Flash');
+  const response = await requestTgz(0x02, 0x1a, [refreshAfterSave ? 1 : 0], 10000, '设置保存后刷新');
   document.getElementById('slotRefreshAfterSave').checked = response.body[0] === 1;
   return response;
 }
@@ -2568,7 +2568,7 @@ function convertGDEM037F51(data, srcWidth = canvas.width, srcHeight = canvas.hei
 
   return output;
 }
-async function writeTgzImage(imageData, mode) {
+async function writeTgzImage(imageData, mode, refreshAfterSave) {
   const packed = MemobusClient.packOfficialPalettePixels(imageData, mode, {
     mirrorHorizontal: true,
   });
@@ -2636,7 +2636,7 @@ async function writeTgzImage(imageData, mode) {
   const finalAck = await finalAckPromise;
   if (finalAck.status !== 0) throw new Error(`设备拒绝图像，状态 ${finalAck.status}`);
   updateTgzTransferOverlay(100);
-  setStatus('传输完成，屏幕刷新中...');
+  setStatus(refreshAfterSave ? '图片已保存，屏幕刷新中...' : '图片已保存到外置 Flash。');
   addLog(`设备已完整接收图片，总用时 ${((performance.now() - startedAt) / 1000).toFixed(1)} 秒`);
 }
 
@@ -2653,16 +2653,17 @@ async function sendimgNative(options = {}) {
     mirrorHorizontal: true,
   });
   const requestedSlot = Number.isInteger(options.slot) ? options.slot : null;
-  const storeRequested = requestedSlot != null || document.getElementById('slotRefreshAfterSave').checked;
+  const storeRequested = true;
   const targetSlot = requestedSlot != null
     ? requestedSlot
-    : (storeRequested ? await findFirstFreeNativeSlot() : null);
-  if (storeRequested && targetSlot == null)
+    : await findFirstFreeNativeSlot();
+  if (targetSlot == null)
     throw new Error('外置 Flash 容量已满，已拒绝继续保存');
 
-  const refreshAfterSave = storeRequested && options.refreshAfterSave === true;
-  if (storeRequested) cacheCurrentSlotPreview(targetSlot, processedData, mode);
-  if (storeRequested && !await writeNativeNrfCommand(
+  const refreshAfterSave = options.refreshAfterSave ??
+    document.getElementById('slotRefreshAfterSave').checked;
+  cacheCurrentSlotPreview(targetSlot, processedData, mode);
+  if (!await writeNativeNrfCommand(
     EpdCmd.SET_SLOT,
     encodeNativeSlotAction(0, targetSlot),
     true
@@ -2685,30 +2686,24 @@ async function sendimgNative(options = {}) {
     message => message === 'ready=1' ||
       message.startsWith('display_error=') || message.startsWith('slot_error='),
     95000,
-    storeRequested ? '槽位保存完成' : '屏幕刷新完成'
+    '槽位保存完成'
   );
-  const completionSent = storeRequested
-    ? await writeNativeNrfCommand(
-      EpdCmd.SET_SLOT,
-      encodeNativeSlotAction(refreshAfterSave ? 3 : 2, targetSlot),
-      true
-    )
-    : await writeNativeNrfCommand(EpdCmd.REFRESH, null, true);
-  if (!completionSent) throw new Error(storeRequested ? '槽位提交失败' : '刷新命令发送失败');
-  setStatus(storeRequested ? '图片已发送，正在保存槽位...' : '图片已发送，屏幕刷新中...');
+  const completionSent = await writeNativeNrfCommand(
+    EpdCmd.SET_SLOT,
+    encodeNativeSlotAction(refreshAfterSave ? 3 : 2, targetSlot),
+    true
+  );
+  if (!completionSent) throw new Error('槽位提交失败');
+  setStatus(refreshAfterSave ? '图片已保存，屏幕刷新中...' : '图片已发送，正在保存槽位...');
   const response = await completion;
   if (response !== 'ready=1') throw new Error(response);
   updateTgzTransferOverlay(100);
 
-  if (storeRequested) {
-    await refreshSlots(Math.floor(targetSlot / SLOT_PAGE_SIZE) * SLOT_PAGE_SIZE);
-    if (refreshAfterSave) {
-      setStatus(`槽位 ${targetSlot + 1} 已保存并刷新。`);
-    } else {
-      setStatus(`图片已保存到槽位 ${targetSlot + 1}，可用设备按键切换。`);
-    }
+  await refreshSlots(Math.floor(targetSlot / SLOT_PAGE_SIZE) * SLOT_PAGE_SIZE);
+  if (refreshAfterSave) {
+    setStatus(`槽位 ${targetSlot + 1} 已保存并刷新。`);
   } else {
-    setStatus('屏幕刷新完成。');
+    setStatus(`图片已保存到槽位 ${targetSlot + 1}，可用设备按键切换。`);
   }
   return true;
 }
@@ -2736,17 +2731,16 @@ async function sendimg(options = {}) {
     document.getElementById('ditherMode').value = mode;
     const processedData = processCanvasImageData();
     const finalImageData = decodeProcessedData(processedData, canvas.width, canvas.height, mode);
-    const store = document.getElementById('slotRefreshAfterSave').checked;
-    if (store) {
-      await refreshTgzStorage();
-      if (tgzStorageFreeSlots === 0) throw new Error('外置 Flash 容量已满，已拒绝继续保存');
-    }
-    await setTgzTransferMode(store);
-    await writeTgzImage(finalImageData, mode);
-    if (store) {
-      setStatus('图片已保存到外置 Flash，可用按键切换。');
-      await refreshTgzStorage();
-    }
+    const refreshAfterSave = document.getElementById('slotRefreshAfterSave').checked;
+    await refreshTgzStorage();
+    if (!tgzStorageAvailable) throw new Error('未识别到可用外置 Flash');
+    if (tgzStorageFreeSlots === 0) throw new Error('外置 Flash 容量已满，已拒绝继续保存');
+    await setTgzTransferMode(refreshAfterSave);
+    await writeTgzImage(finalImageData, mode, refreshAfterSave);
+    setStatus(refreshAfterSave
+      ? '图片已保存，屏幕刷新中...'
+      : '图片已保存到外置 Flash，可用按键切换。');
+    await refreshTgzStorage();
     await sleep(700);
     hideTgzTransferOverlay();
     return true;
@@ -3535,12 +3529,11 @@ function configureTgzUi() {
     if (!isBleConnected()) return;
     try {
       if (nrfEpdCharacteristic) {
-        if (event.target.checked && slotState.count === 0)
-          throw new Error('未识别到可用外置 Flash');
+        if (slotState.count === 0) throw new Error('未识别到可用外置 Flash');
       } else {
         await setTgzTransferMode(event.target.checked);
       }
-      addLog(event.target.checked ? '传图模式：保存到外置 Flash' : '传图模式：直接显示');
+      addLog(event.target.checked ? '传图后将刷新屏幕' : '传图后仅保存到图片槽');
     } catch (error) {
       event.target.checked = false;
       addLog(error.message || String(error));
@@ -4699,7 +4692,7 @@ document.body.onload = () => {
   loadGlassClarity();
   loadPageBackgroundSettings();
   loadPageBackground();
-  addLog('TGZ-52811 离线上位机 v20260827.5；图片和滤镜均只在本机处理');
+  addLog('TGZ-52811 v20260827.6；图片和滤镜均只在本机处理');
 }
 
 
