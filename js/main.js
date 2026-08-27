@@ -1010,7 +1010,7 @@ function renderSlotGrid(forceDisabled = imageTransferActive || slotActionPending
     return;
   }
 
-  if (!nrfEpdCharacteristic && tgzStorageAvailable) {
+  if (!nrfEpdCharacteristic && tgzStorageAvailable && slotState.pageCount === 0) {
     summary.textContent = `外置 Flash ${formatSlotBytes(slotState.flashSize)} · 已用 ${tgzStorageUsedSlots}/${slotState.count} · 可存 ${tgzStorageFreeSlots} 张`;
     hint.textContent = `剩余 ${formatSlotBytes(tgzStorageRemainingBytes)}；保存模式下容量满会拒绝继续写入`;
     return;
@@ -1121,7 +1121,7 @@ async function refreshSlots(start = slotState.pageStart) {
     ]), false);
     return response;
   }
-  await write(EpdCmd.GET_SLOTS, encodeUint32LE(normalizedStart));
+  return refreshTgzStorage(normalizedStart);
 }
 
 async function findFirstFreeNativeSlot() {
@@ -1229,11 +1229,17 @@ async function freeImageSlot(slot) {
         EpdCmd.FREE_SLOT,
         ...encodeUint32LE(slot),
       ]), false).then(() => true, () => false)
-    : await write(EpdCmd.FREE_SLOT, encodeSlotIndex(slot));
+    : await requestTgzSlotAction(2, slot, '删除槽位').then(() => true, () => false);
   if (sent) {
     removeSlotImageCache(slot);
-    renderSlotGrid(true);
-    addLog(`槽位 ${slot + 1} 删除命令已发送。`);
+    if (!nrfEpdCharacteristic) {
+      await refreshSlots(Math.floor(slot / SLOT_PAGE_SIZE) * SLOT_PAGE_SIZE);
+      setSlotActionPending(false);
+      addLog(`槽位 ${slot + 1} 已删除。`);
+    } else {
+      renderSlotGrid(true);
+      addLog(`槽位 ${slot + 1} 删除命令已发送。`);
+    }
   } else {
     setSlotActionPending(false);
   }
@@ -1271,9 +1277,10 @@ async function displayImageSlot(slot) {
         EpdCmd.SET_SLOT,
         ...encodeNativeSlotAction(1, slot),
       ]), false).then(() => true, () => false)
-    : await write(EpdCmd.SET_SLOT, encodeSlotAction(1, slot));
+    : await requestTgzSlotAction(1, slot, '显示槽位').then(() => true, () => false);
   if (sent) {
     addLog(`已请求设备显示槽位 ${slot + 1}。`);
+    if (!nrfEpdCharacteristic) setSlotActionPending(false);
   } else {
     setSlotActionPending(false);
   }
@@ -2090,6 +2097,27 @@ function applyTgzStorageInfo(body) {
   tgzStorageRemainingBytes = remaining;
   slotState.count = total;
   slotState.flashSize = capacity;
+  if (body.length >= 38) {
+    const pageStart = readTgzLe16(body, 30);
+    const pageCount = readTgzLe16(body, 32);
+    const usedMask = readTgzLe32(body, 34);
+    const selectedRaw = readTgzLe16(body, 28);
+    slotProtocolV2 = true;
+    slotState = {
+      count: total,
+      pageStart,
+      pageCount,
+      usedMask,
+      selected: selectedRaw === 0xFFFF ? null : selectedRaw,
+      flashSize: capacity,
+      fingerprints: [],
+    };
+    loadSlotImageCache();
+  } else {
+    slotState.pageStart = 0;
+    slotState.pageCount = 0;
+    slotState.usedMask = 0;
+  }
   document.getElementById('slotRefreshAfterSave').checked = refreshAfterSave;
   document.getElementById('slotSummary').textContent = tgzStorageAvailable
     ? `外置 Flash ${formatSlotBytes(capacity)} · 已用 ${used}/${total} · 可存 ${free} 张`
@@ -2097,10 +2125,11 @@ function applyTgzStorageInfo(body) {
   document.getElementById('slotHint').textContent = tgzStorageAvailable
     ? `剩余 ${formatSlotBytes(remaining)}；容量满后会拒绝继续写入`
     : '未识别到外置 Flash，无法传图';
+  renderSlotGrid();
   updateButtonStatus();
 }
 
-async function refreshTgzStorage() {
+async function refreshTgzStorage(start = slotState.pageStart) {
   const summary = document.getElementById('slotSummary');
   const hint = document.getElementById('slotHint');
   summary.textContent = '正在读取外置 Flash...';
@@ -2109,7 +2138,10 @@ async function refreshTgzStorage() {
 
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      const response = await requestTgz(0x02, 0x19, null, 6000, '读取 Flash 容量');
+      const normalizedStart = Math.max(0, start || 0);
+      const response = await requestTgz(0x02, 0x19,
+        normalizedStart === 0 ? null : encodeUint32LE(normalizedStart),
+        6000, '读取 Flash 容量');
       if (response.body.length < 30) {
         throw new Error(`Flash 容量响应不完整（${response.body.length}/30 字节）`);
       }
@@ -2144,6 +2176,13 @@ async function setTgzTransferMode(refreshAfterSave) {
   const response = await requestTgz(0x02, 0x1a, [refreshAfterSave ? 1 : 0], 10000, '设置保存后刷新');
   document.getElementById('slotRefreshAfterSave').checked = response.body[0] === 1;
   return response;
+}
+
+async function requestTgzSlotAction(action, slot, description = '图片槽操作') {
+  const payload = new Uint8Array(5);
+  payload[0] = action & 0xFF;
+  payload.set(encodeUint32LE(slot >>> 0), 1);
+  return requestTgz(0x02, 0x1d, payload, 20000, description);
 }
 
 async function eraseTgzStorage() {
@@ -2754,15 +2793,27 @@ async function sendimg(options = {}) {
     const processedData = processCanvasImageData();
     const finalImageData = decodeProcessedData(processedData, canvas.width, canvas.height, mode);
     const refreshAfterSave = document.getElementById('slotRefreshAfterSave').checked;
-    await refreshTgzStorage();
+    const targetSlot = Number.isInteger(options.slot) ? options.slot : null;
+    await refreshTgzStorage(targetSlot == null
+      ? slotState.pageStart
+      : Math.floor(targetSlot / SLOT_PAGE_SIZE) * SLOT_PAGE_SIZE);
     if (!tgzStorageAvailable) throw new Error('未识别到可用外置 Flash');
-    if (tgzStorageFreeSlots === 0) throw new Error('外置 Flash 容量已满，已拒绝继续保存');
+    if (targetSlot == null && tgzStorageFreeSlots === 0)
+      throw new Error('外置 Flash 容量已满，已拒绝继续保存');
+    if (targetSlot != null) {
+      if (targetSlot < 0 || targetSlot >= slotState.count)
+        throw new Error('图片槽编号无效');
+      cacheCurrentSlotPreview(targetSlot, processedData, mode);
+      await requestTgzSlotAction(0, targetSlot, '准备图片槽');
+    }
     await setTgzTransferMode(refreshAfterSave);
     await writeTgzImage(finalImageData, mode, refreshAfterSave);
     setStatus(refreshAfterSave
       ? '图片已保存，屏幕刷新中...'
       : '图片已保存到外置 Flash，可用按键切换。');
-    await refreshTgzStorage();
+    await refreshTgzStorage(targetSlot == null
+      ? slotState.pageStart
+      : Math.floor(targetSlot / SLOT_PAGE_SIZE) * SLOT_PAGE_SIZE);
     await sleep(700);
     hideTgzTransferOverlay();
     return true;
@@ -4717,7 +4768,7 @@ document.body.onload = () => {
   loadGlassClarity();
   loadPageBackgroundSettings();
   loadPageBackground();
-  addLog('TGZ-52811 v20260827.6；图片和滤镜均只在本机处理');
+  addLog('TGZ-52811 v20260827.7；图片和滤镜均只在本机处理');
 }
 
 
