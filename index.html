@@ -215,8 +215,8 @@
 					</select>
 					<label for="tgzFilter">滤镜:</label>
 					<select id="tgzFilter" onchange="applyDither()">
-						<option value="none">原图</option>
-						<option value="contrastWarm" selected>反差暖色</option>
+						<option value="none">无滤镜</option>
+						<option value="contrastWarm" selected>官方默认</option>
 						<option value="outdoor">户外</option>
 						<option value="amberFilm">琥珀映画</option>
 						<option value="filmNoirColor">彩色电影</option>
@@ -241,6 +241,7 @@
 						<option value="yellowTriTone">黑白黄</option>
 						<option value="pureRedBlack">红色调</option>
 						<option value="pureYellowBlack">黄色调</option>
+						<option value="color">彩色</option>
 					</select>
 					<button id="resetDitherAdjustments" type="button" class="secondary">还原默认</button>
 				</div>
@@ -285,18 +286,18 @@
 					</div>
 					<div class="flex-group">
 						<label for="ditherContrast">对比度:</label>
-						<input type="range" min="0" max="2" step="0.1" value="1.4" id="ditherContrast">
-						<label id="ditherContrastValue">1.4</label>
+						<input type="range" min="0" max="2" step="0.1" value="1" id="ditherContrast">
+						<label id="ditherContrastValue">1.0</label>
 					</div>
 					<div class="flex-group">
 						<label for="ditherBrightness">亮度:</label>
-						<input type="range" min="0" max="2" step="0.1" value="0.9" id="ditherBrightness">
-						<label id="ditherBrightnessValue">0.9</label>
+						<input type="range" min="0" max="2" step="0.1" value="1" id="ditherBrightness">
+						<label id="ditherBrightnessValue">1.0</label>
 					</div>
 					<div class="flex-group">
 						<label for="ditherSaturation">饱和度:</label>
-						<input type="range" min="0" max="2" step="0.1" value="1.1" id="ditherSaturation">
-						<label id="ditherSaturationValue">1.1</label>
+						<input type="range" min="0" max="2" step="0.1" value="1" id="ditherSaturation">
+						<label id="ditherSaturationValue">1.0</label>
 					</div>
 				</div>
 				<div class="flex-container canvas-tools">
@@ -554,14 +555,14 @@
 	</div>
 	<script type="text/javascript" src="js/tgz-filter-curves.js?v=2026082701"></script>
 	<script type="text/javascript" src="js/tgz-filter-lut.js?v=2026082601"></script>
-	<script type="text/javascript" src="js/tgz-filters.js?v=2026082701"></script>
+	<script type="text/javascript" src="js/tgz-filters.js?v=2026082804"></script>
 	<script type="text/javascript" src="js/tgz-dither-luts.js?v=2026082601"></script>
-	<script type="text/javascript" src="js/dithering.js?v=2026082702"></script>
+	<script type="text/javascript" src="js/dithering.js?v=2026082802"></script>
 	<script type="text/javascript" src="js/paint.js?v=2026072301"></script>
 	<script type="text/javascript" src="js/crop.js?v=2026082701"></script>
 	<script type="text/javascript" src="js/secure-dfu.js?v=2026072703"></script>
 	<script type="text/javascript" src="js/memobus-client.js?v=2026082606"></script>
-	<script type="text/javascript" src="js/main.js?v=2026082712"></script>
+	<script type="text/javascript" src="js/main.js?v=2026082803"></script>
 </body>
 
 </html>

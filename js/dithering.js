@@ -64,6 +64,24 @@ const tgzSixTransferPalette = Object.freeze([
   rgbPalette[3], rgbPalette[1], rgbPalette[2]
 ]);
 
+// FilterRegistry.ditherFunctions in the official App does not send every
+// filter through the generic four/six-color quantizer. These filters use a
+// restricted ink palette after their visual filter stage.
+const tgzOfficialFilterPaletteIndexes = Object.freeze({
+  pencil: Object.freeze([0, 1]),
+  grayscale: Object.freeze([0, 1]),
+  highContrastBW: Object.freeze([0, 1]),
+  crushBW: Object.freeze([0, 1]),
+  filmNoir: Object.freeze([0, 1]),
+  redWhite: Object.freeze([3, 1]),
+  blackYellow: Object.freeze([0, 2]),
+  redTriTone: Object.freeze([0, 3, 1]),
+  yellowTriTone: Object.freeze([0, 2, 1]),
+  pureRedBlack: Object.freeze([3, 0]),
+  pureYellowBlack: Object.freeze([2, 0]),
+  pureBlackWhite: Object.freeze([0, 1])
+});
+
 function tgzClampByte(value) {
   return value < 0 ? 0 : value > 255 ? 255 : value;
 }
@@ -180,17 +198,25 @@ function advanceTgzAtkinsonRows(rows) {
   rows[8] = new Int32Array(rows[0].length);
 }
 
-function tgzAutoDither(imageData, mode) {
+function tgzAutoDither(imageData, mode, filterId = 'none') {
   const width = imageData.width;
   const height = imageData.height;
   const data = imageData.data;
   const rows = createTgzAtkinsonRows(width);
   const sixColor = mode === 'sixColor';
-  const chooseColor = sixColor
+  const restrictedIndexes = tgzOfficialFilterPaletteIndexes[filterId];
+  const idealPalette = restrictedIndexes
+    ? restrictedIndexes.map(index => tgzFourIdealPalette[index])
+    : (sixColor ? tgzSixIdealPalette : tgzFourIdealPalette);
+  const errorPalette = restrictedIndexes
+    ? idealPalette
+    : (sixColor ? tgzSixCalibratedPalette : tgzFourIdealPalette);
+  const transferPalette = restrictedIndexes
+    ? restrictedIndexes.map(index => tgzFourTransferPalette[index])
+    : (sixColor ? tgzSixTransferPalette : tgzFourTransferPalette);
+  const chooseColor = !restrictedIndexes && sixColor
     ? createTgzSixColorChooser()
-    : (r, g, b) => tgzNearestRgb(r, g, b, tgzFourIdealPalette);
-  const errorPalette = sixColor ? tgzSixCalibratedPalette : tgzFourIdealPalette;
-  const transferPalette = sixColor ? tgzSixTransferPalette : tgzFourTransferPalette;
+    : (r, g, b) => tgzNearestRgb(r, g, b, idealPalette);
 
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
@@ -1137,7 +1163,8 @@ function esp32DitherImage(
 function ditherImage(imageData, alg, strength, mode, adjustments = {}) {
   if (alg === 'tgzAuto') {
     if (mode === 'fourColor' || mode === 'sixColor') {
-      return tgzAutoDither(imageData, mode);
+      applyEsp32Adjustments(imageData, adjustments);
+      return tgzAutoDither(imageData, mode, adjustments.filter);
     }
     // The recovered App path only defines four/six-color behavior.
     alg = 'atkinson';

@@ -3738,9 +3738,9 @@ function setDitherAdjustment(id, value, digits) {
 
 function resetDitherAdjustments() {
   setDitherAdjustment('ditherStrength', 0.6, 1);
-  setDitherAdjustment('ditherContrast', 1.4, 1);
-  setDitherAdjustment('ditherBrightness', 0.9, 1);
-  setDitherAdjustment('ditherSaturation', 1.1, 1);
+  setDitherAdjustment('ditherContrast', 1, 1);
+  setDitherAdjustment('ditherBrightness', 1, 1);
+  setDitherAdjustment('ditherSaturation', 1, 1);
   applyDither();
 }
 

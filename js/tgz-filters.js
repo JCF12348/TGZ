@@ -27,7 +27,8 @@ const TGZ_FILTERS = Object.freeze([
   ['redTriTone', '黑白红'],
   ['yellowTriTone', '黑白黄'],
   ['pureRedBlack', '红色调'],
-  ['pureYellowBlack', '黄色调']
+  ['pureYellowBlack', '黄色调'],
+  ['color', '彩色']
 ]);
 
 const tgzFilterTextureCache = new Map();
@@ -60,8 +61,22 @@ function tgzFilterMap(imageData, mapper) {
   return output;
 }
 
-function tgzFilterContrast(value, factor, midpoint = 128) {
+function tgzFilterContrast(value, factor, midpoint = 127.5) {
   return (value - midpoint) * factor + midpoint;
+}
+
+// The App's contrast filters use gamma followed by smoothstep, not a linear
+// midpoint stretch. This is reconstructed from ImageFilters' AOT math.
+function tgzOfficialSmoothContrast(value, amount) {
+  const normalized = Math.max(0, Math.min(1, value / 255));
+  const gamma = Math.pow(normalized, 1 / amount);
+  return gamma * gamma * (3 - 2 * gamma) * 255;
+}
+
+function tgzOfficialClippedGamma(value, low, high, amount) {
+  if (value < low) return 0;
+  if (value > high) return 255;
+  return Math.pow((value - low) / (high - low), 1 / amount) * 255;
 }
 
 function tgzFilterSaturate(r, g, b, amount) {
@@ -150,10 +165,9 @@ function tgzFilterDuotone(imageData, dark, light) {
 function tgzFilterTriTone(imageData, dark, middle, light) {
   return tgzFilterMap(imageData, (r, g, b) => {
     const amount = tgzFilterLuma(r, g, b) / 255;
-    if (amount >= 2 / 3) return light;
-    const start = amount < 1 / 3 ? dark : middle;
-    const end = amount < 1 / 3 ? middle : light;
-    const mix = amount < 1 / 3 ? amount * 3 : (amount - 1 / 3) * 3;
+    const start = amount < 1 / 3 ? dark : amount < 2 / 3 ? middle : light;
+    const end = amount < 1 / 3 ? middle : amount < 2 / 3 ? light : light;
+    const mix = amount < 1 / 3 ? amount * 3 : amount < 2 / 3 ? (amount - 1 / 3) * 3 : 0;
     return [
       start[0] + (end[0] - start[0]) * mix,
       start[1] + (end[1] - start[1]) * mix,
@@ -241,6 +255,52 @@ function tgzFilterBoxBlur(values, width, height, radius) {
   return output;
 }
 
+function tgzGaussianBlurImageData(imageData, radius) {
+  const width = imageData.width;
+  const height = imageData.height;
+  const source = imageData.data;
+  const output = tgzFilterClone(imageData);
+  const horizontal = new Float32Array(source.length);
+  const sigma = Math.max(0.5, radius / 2);
+  const weights = new Float32Array(radius * 2 + 1);
+  let weightTotal = 0;
+  for (let offset = -radius; offset <= radius; offset++) {
+    const weight = Math.exp(-(offset * offset) / (2 * sigma * sigma));
+    weights[offset + radius] = weight;
+    weightTotal += weight;
+  }
+  for (let index = 0; index < weights.length; index++) weights[index] /= weightTotal;
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const target = (y * width + x) * 4;
+      for (let channel = 0; channel < 3; channel++) {
+        let sum = 0;
+        for (let offset = -radius; offset <= radius; offset++) {
+          const sampleX = Math.max(0, Math.min(width - 1, x + offset));
+          sum += source[(y * width + sampleX) * 4 + channel] * weights[offset + radius];
+        }
+        horizontal[target + channel] = sum;
+      }
+      horizontal[target + 3] = source[target + 3];
+    }
+  }
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const target = (y * width + x) * 4;
+      for (let channel = 0; channel < 3; channel++) {
+        let sum = 0;
+        for (let offset = -radius; offset <= radius; offset++) {
+          const sampleY = Math.max(0, Math.min(height - 1, y + offset));
+          sum += horizontal[(sampleY * width + x) * 4 + channel] * weights[offset + radius];
+        }
+        output.data[target + channel] = tgzFilterClamp(sum);
+      }
+    }
+  }
+  return output;
+}
+
 function tgzGetTextureData(index, width, height) {
   const image = tgzFilterTextureCache.get(index);
   if (!image || !image.complete || !image.naturalWidth || typeof document === 'undefined') return null;
@@ -264,41 +324,66 @@ function tgzApplyPencil(imageData, keepColor) {
   const gray = new Float32Array(width * height);
   for (let pixel = 0; pixel < gray.length; pixel++) {
     const offset = pixel * 4;
-    gray[pixel] = tgzFilterLuma(source[offset], source[offset + 1], source[offset + 2]);
+    gray[pixel] = (77 * source[offset] + 150 * source[offset + 1] + 29 * source[offset + 2]) >> 8;
   }
-  const inverted = new Float32Array(gray.length);
-  for (let pixel = 0; pixel < gray.length; pixel++) inverted[pixel] = 255 - gray[pixel];
-  const blurred = tgzFilterBoxBlur(inverted, width, height, 3);
-  const texture = tgzGetTextureData(keepColor ? 1 : 0, width, height);
+  const blurred = tgzFilterBoxBlur(gray, width, height, 5);
+  const darkTexture = tgzGetTextureData(0, width, height);
+  const midTexture = tgzGetTextureData(1, width, height);
   return tgzFilterMap(imageData, (r, g, b, pixel) => {
-    const dodge = Math.min(255, gray[pixel] * 255 / Math.max(1, 255 - blurred[pixel]));
-    const paper = texture ? 0.82 + tgzFilterLuma(
-      texture[pixel * 4], texture[pixel * 4 + 1], texture[pixel * 4 + 2]
-    ) / 1416 : 1;
-    const sketch = tgzFilterClamp(Math.max(64, Math.min(220, dodge)) * paper);
-    if (!keepColor) return [sketch, sketch, sketch];
-    return [r * sketch / 255, g * sketch / 255, b * sketch / 255];
+    const blur = Math.round(blurred[pixel]);
+    const dodge = blur < 10
+      ? 255
+      : 255 - Math.max(0, Math.min(255, ((256 - Math.trunc(gray[pixel] * 256 / blur)) * 510) >> 8));
+    const textureLuma = texture => texture
+      ? (77 * texture[pixel * 4] + 150 * texture[pixel * 4 + 1] + 29 * texture[pixel * 4 + 2]) >> 8
+      : dodge;
+    let pencil = gray[pixel] < 64
+      ? textureLuma(darkTexture)
+      : gray[pixel] > 220 ? 255 : textureLuma(midTexture);
+    if (dodge < 200) pencil = 0;
+    pencil = tgzFilterClamp(pencil);
+    if (!keepColor) return [pencil, pencil, pencil];
+
+    const cb = Math.trunc((-169 * r - 331 * g + 500 * b) / 1000) + 128;
+    const cr = Math.trunc((500 * r - 419 * g - 81 * b) / 1000) + 128;
+    return [
+      pencil + ((cr - 128) * 1403 >> 10),
+      pencil - ((cb - 128) * 343 >> 10) - ((cr - 128) * 714 >> 10),
+      pencil + ((cb - 128) * 1770 >> 10)
+    ];
   });
 }
 
-function tgzNoise() {
-  return Math.random();
+function tgzNoise(pixel, seed) {
+  let value = (pixel + 1) ^ seed;
+  value = Math.imul(value ^ (value >>> 16), 0x45d9f3b);
+  value = Math.imul(value ^ (value >>> 16), 0x45d9f3b);
+  return ((value ^ (value >>> 16)) >>> 0) / 0xffffffff;
 }
 
 function tgzApplyIPhone4(imageData) {
-  return tgzFilterMap(imageData, (r, g, b, pixel) => {
+  const blurred = tgzGaussianBlurImageData(imageData, 3);
+  return tgzFilterMap(blurred, (r, g, b, pixel) => {
     const noise = (tgzNoise(pixel, 0x34) - 0.5) * 34;
-    return [r * 1.05 + 15 + noise, g * 1.02 + 10 + noise, tgzFilterContrast(b, 0.85) + 10 + noise];
+    const adjustedRed = tgzFilterClamp(r * 1.05 + 15);
+    const adjustedGreen = tgzFilterClamp(g * 1.02 + 10);
+    const adjustedBlue = tgzFilterClamp(b * 0.9);
+    return [
+      tgzFilterContrast(adjustedRed, 0.85) + 15 + noise,
+      tgzFilterContrast(adjustedGreen, 0.85) + 15 + noise,
+      tgzFilterContrast(adjustedBlue, 0.85) + 10 + noise
+    ];
   });
 }
 
 function tgzApplyY2K(imageData) {
-  const width = imageData.width;
-  const height = imageData.height;
+  const blurred = tgzGaussianBlurImageData(imageData, 2);
+  const width = blurred.width;
+  const height = blurred.height;
   const cx = (width - 1) / 2;
   const cy = (height - 1) / 2;
   const maxDistance = Math.sqrt(cx * cx + cy * cy) || 1;
-  return tgzFilterMap(imageData, (r, g, b, pixel) => {
+  return tgzFilterMap(blurred, (r, g, b, pixel) => {
     let color = tgzFilterSaturate(r * 1.15, g * 1.15, b * 1.15, 0.85);
     color = color.map(value => (value / 255 * 1.05 - 0.025) * 255);
     color = [color[0] * 0.862745 + 20, color[1] * 0.823529 + 10, color[2] * 0.941176 + 35];
@@ -332,18 +417,16 @@ function tgzApplyColdFilm(imageData) {
 
 function tgzApplyVintageSlide(imageData) {
   return tgzFilterMap(imageData, (r, g, b) => {
-    const gray = tgzFilterLuma(r, g, b);
     const saturated = tgzFilterSaturate(r, g, b, 1.3);
-    const contrast = saturated.map(value => tgzFilterContrast(value, 1.4));
-    return [contrast[0] * 1.08 + gray * 0.06, contrast[1] * 0.98 + gray * 0.02, contrast[2] * 0.82];
+    return saturated.map(value => tgzOfficialSmoothContrast(value, 1.4));
   });
 }
 
 function tgzApplyChrome(imageData, redVariant) {
   return tgzFilterMap(imageData, (r, g, b) => {
     const saturated = tgzFilterSaturate(r, g, b, 1.2);
-    if (redVariant) return [tgzFilterContrast(saturated[0], 1.3) * 1.15, saturated[1] * 0.6, saturated[2] * 0.5];
-    return [saturated[0] * 1.1, saturated[1] * 1.1, saturated[2] * 0.5];
+    const scales = redVariant ? [1, 0.6, 0.5] : [1.1, 1.1, 0.5];
+    return saturated.map((value, channel) => tgzOfficialSmoothContrast(value * scales[channel], 1.3));
   });
 }
 
@@ -356,26 +439,27 @@ function tgzApplySepia(imageData) {
 
 function tgzApplyFilmNoir(imageData, keepColor) {
   return tgzFilterMap(imageData, (r, g, b) => {
-    const gray = tgzFilterLuma(r, g, b);
-    const contrast = tgzFilterContrast(gray, 2.5, 100);
-    if (!keepColor) return [contrast, contrast, contrast];
-    const scale = contrast / Math.max(1, gray);
-    return [r * scale, g * scale, b * scale];
+    if (keepColor) {
+      return [r, g, b].map(value => tgzOfficialClippedGamma(value, 80, 180, 2.5));
+    }
+    const gray = tgzOfficialClippedGamma(tgzFilterLuma(r, g, b), 80, 180, 2.5);
+    return [gray, gray, gray];
   });
 }
 
 const tgzFilterImplementations = Object.freeze({
   none: tgzFilterClone,
   outdoor: tgzFilterClone,
+  color: imageData => tgzFilterBasic(imageData, { saturation: 1.15 }),
   contrastWarm: tgzApplyContrastWarm,
   amberFilm: tgzApplyCubeLut,
   grayscale: tgzFilterGrayscale,
   highContrastBW: imageData => tgzFilterMap(imageData, (r, g, b) => {
-    const gray = tgzFilterContrast(tgzFilterLuma(r, g, b), 1.8);
+    const gray = tgzOfficialSmoothContrast(tgzFilterLuma(r, g, b), 1.8);
     return [gray, gray, gray];
   }),
   crushBW: imageData => tgzFilterMap(imageData, (r, g, b) => {
-    const gray = tgzFilterContrast(tgzFilterLuma(r, g, b), 1.2, 170);
+    const gray = tgzOfficialClippedGamma(tgzFilterLuma(r, g, b), 40, 210, 1.2);
     return [gray, gray, gray];
   }),
   filmNoir: imageData => tgzApplyFilmNoir(imageData, false),
@@ -400,8 +484,10 @@ const tgzFilterImplementations = Object.freeze({
 });
 
 function applyTgzFilter(imageData, filterId) {
-  if (filterId === 'none') return tgzFilterClone(imageData);
   const implementation = tgzFilterImplementations[filterId] || tgzFilterImplementations.none;
+  if (filterId === 'none' || !tgzFilterImplementations[filterId]) {
+    return implementation(imageData);
+  }
   return implementation(tgzPreprocessOfficial(imageData));
 }
 
