@@ -117,6 +117,12 @@ const EPD_WRITE_UUID = '0000ff01-0000-1000-8000-00805f9b34fb';
 const EPD_NOTIFY_UUID = '0000ff02-0000-1000-8000-00805f9b34fb';
 const TGZ_WIDTH = 760;
 const TGZ_HEIGHT = 528;
+const DEFAULT_OFFICIAL_PAPER_INFO = Object.freeze({
+  version: 9,
+  calibration: 100,
+  width: 528,
+  height: 760,
+});
 const TGZ_RLE_CHUNK_SIZE = 1024;
 const TGZ_PACKET_LENGTHS = [180, 120, 64, 20];
 const TGZ_WRITE_PACING_MS = 4;
@@ -278,6 +284,7 @@ function resetVariables(options = {}) {
   tgzStorageFreeSlots = 0;
   tgzStorageRemainingBytes = 0;
   tgzImageErrorResponse = null;
+  if (cropManager) cropManager.setOfficialPaperInfo(DEFAULT_OFFICIAL_PAPER_INFO);
   nativeNrfMtu = 20;
   nativeImageTransferError = null;
   nativeImageFlowSupport = false;
@@ -2105,6 +2112,32 @@ function readTgzLe32(data, offset) {
     data[offset + 2] << 16 | data[offset + 3] << 24) >>> 0;
 }
 
+function parseTgzPaperInfo(body) {
+  if (!body || body.length < 40) {
+    throw new Error(`相纸信息响应不完整（${body ? body.length : 0}/40 字节）`);
+  }
+  return {
+    version: readTgzLe16(body, 32),
+    calibration: readTgzLe16(body, 34),
+    width: readTgzLe16(body, 36),
+    height: readTgzLe16(body, 38),
+  };
+}
+
+function applyTgzPaperInfo(body) {
+  const info = parseTgzPaperInfo(body);
+  const applied = cropManager
+    ? cropManager.setOfficialPaperInfo(info)
+    : { ...info, scale: CropManager.getOfficialPaperScale(info) };
+  addLog(`官方相纸裁切：v${applied.version} ${applied.width}×${applied.height}，比例 ${applied.scale}%`);
+  return applied;
+}
+
+async function refreshTgzPaperInfo() {
+  const response = await requestTgz(0x02, 0x17, null, 10000, '读取相纸信息');
+  return applyTgzPaperInfo(response.body);
+}
+
 function applyTgzStorageInfo(body) {
   if (body.length < 30) return;
   tgzStorageAvailable = (body[1] & 0x01) !== 0;
@@ -3428,6 +3461,18 @@ async function connect() {
       applyTgzHandshake(handshake);
       await identifyTgzPanel();
       await refreshTgzStorage();
+    }
+
+    if (legacyEpdCharacteristic) {
+      try {
+        await refreshTgzPaperInfo();
+      } catch (paperError) {
+        cropManager.setOfficialPaperInfo(DEFAULT_OFFICIAL_PAPER_INFO);
+        addLog(`相纸信息读取失败，使用 v9 528×760 默认裁切：${paperError.message || paperError}`);
+      }
+    } else {
+      cropManager.setOfficialPaperInfo(DEFAULT_OFFICIAL_PAPER_INFO);
+      addLog('FFFF 相纸信息通道不可用，使用 v9 528×760 默认裁切。');
     }
   } catch (initError) {
     addLog(`设备初始化失败：${initError.message || initError}`);
@@ -4774,7 +4819,8 @@ document.body.onload = () => {
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
   paintManager = new PaintManager(canvas, ctx);
-  cropManager = new CropManager(canvas, ctx, paintManager, { officialPaperScale: 133 });
+  cropManager = new CropManager(canvas, ctx, paintManager);
+  cropManager.setOfficialPaperInfo(DEFAULT_OFFICIAL_PAPER_INFO);
   cropManager.setRenderCallback(renderTransformedImagePreview);
   if (paintManager.setBaseImageData) paintManager.setBaseImageData();
 

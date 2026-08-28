@@ -19,7 +19,9 @@ class CropManager {
     this.animationFrame = 0;
     this.commitTimer = 0;
     this.interactiveDirty = false;
+    this.officialPaperInfo = null;
     this.officialPaperScale = Number(options.officialPaperScale) || 0;
+    if (options.officialPaperInfo) this.setOfficialPaperInfo(options.officialPaperInfo);
 
     this.handleMouseDown = this.handleMouseDown.bind(this);
     this.handleMouseMove = this.handleMouseMove.bind(this);
@@ -28,6 +30,40 @@ class CropManager {
     this.handleTouchStart = this.handleTouchStart.bind(this);
     this.handleTouchMove = this.handleTouchMove.bind(this);
     this.handleTouchEnd = this.handleTouchEnd.bind(this);
+  }
+
+  static getOfficialPaperScale(info = {}) {
+    const version = Number(info.version) || 0;
+    const width = Number(info.width) || 0;
+    const height = Number(info.height) || 0;
+
+    if (version === 1 && width === 480 && height === 800) return 146;
+    if (version === 2 && width === 556 && height === 800) return 143;
+    if (version === 3 && width === 480 && height === 720) return 149;
+    if (version === 4 && width === 528 && height === 768) return 145;
+    if (version >= 5 && version <= 8 && width === 568 && height === 760) return 133;
+    if (version === 9 && width === 528 && height === 760) return 133;
+    return 100;
+  }
+
+  setOfficialPaperInfo(info = {}) {
+    const next = {
+      version: Number(info.version) || 0,
+      calibration: Number(info.calibration) || 0,
+      width: Number(info.width) || 0,
+      height: Number(info.height) || 0
+    };
+    next.scale = CropManager.getOfficialPaperScale(next);
+
+    const previous = this.officialPaperInfo;
+    const changed = !previous || previous.version !== next.version ||
+      previous.calibration !== next.calibration || previous.width !== next.width ||
+      previous.height !== next.height || previous.scale !== next.scale;
+    this.officialPaperInfo = next;
+    this.officialPaperScale = next.scale;
+
+    if (changed && this.originalImage) this.resetTransform(false);
+    return next;
   }
 
   getCropViewport() {
