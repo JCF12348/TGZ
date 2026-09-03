@@ -57,6 +57,9 @@ let tgzStorageFreeSlots = 0;
 let tgzStorageRemainingBytes = 0;
 let tgzTransferProgressFrame = null;
 let tgzTransferTargetProgress = 0;
+let tgzTransferStartedAt = 0;
+let tgzTransferElapsedTimer = null;
+let tgzTransferNextLogPercent = 10;
 let tgzImageErrorResponse = null;
 let nativeNrfMtu = 20;
 let nativeNrfWaiters = [];
@@ -116,11 +119,11 @@ const EPD_SERVICE_UUID = '0000ffff-0000-1000-8000-00805f9b34fb';
 const EPD_WRITE_UUID = '0000ff01-0000-1000-8000-00805f9b34fb';
 const EPD_NOTIFY_UUID = '0000ff02-0000-1000-8000-00805f9b34fb';
 const TGZ_WIDTH = 760;
-const TGZ_HEIGHT = 528;
+const TGZ_HEIGHT = 568;
 const DEFAULT_OFFICIAL_PAPER_INFO = Object.freeze({
   version: 9,
   calibration: 100,
-  width: 528,
+  width: 568,
   height: 760,
 });
 const TGZ_RLE_CHUNK_SIZE = 1024;
@@ -170,7 +173,7 @@ const LED_CONTROL_MIN_VERSION = 0x40;
 let firmwareVersion = { label: '未知', ledControl: false, directImagePrepare: false, outdated: true };
 
 const canvasSizes = [
-  { name: 'TGZ_760_528', width: 760, height: 528 },
+  { name: 'TGZ_760_568', width: 760, height: 568 },
   { name: '1.54_152_152', width: 152, height: 152 },
   { name: '1.54_200_200', width: 200, height: 200 },
   { name: '2.13_212_104', width: 212, height: 104 },
@@ -1818,14 +1821,8 @@ async function writeImage(data, step = 'bw', waitForPrepare = false, commandWrit
   const compressedSize = rleChunks.reduce((total, chunk) => total + chunk.length, 0);
   const useRle = rleSupport && compressedSize > 0 && compressedSize < rawData.length;
   const count = useRle ? rleChunks.length : Math.ceil(rawData.length / chunkSize);
-  const stepName = step === 'bw' ? '图像' : '颜色';
-  const transferSize = useRle ? compressedSize : rawData.length;
   let noReplyCount = interleavedCount;
-  let nextLogPercent = 10;
   let preparePromise = null;
-
-  if (useRle) addLog(`${stepName} RLE 压缩：${rawData.length} → ${compressedSize} 字节 (${(compressedSize * 100 / rawData.length).toFixed(1)}%)`);
-  addLog(`${stepName}开始传输：${transferSize} 字节，共 ${count} 包。`, '⇑');
 
   for (let chunkIdx = 0; chunkIdx < count; chunkIdx++) {
     if (displayErrorActive) return false;
@@ -1836,9 +1833,6 @@ async function writeImage(data, step = 'bw', waitForPrepare = false, commandWrit
     }
     const offset = chunkIdx * chunkSize;
     const chunk = useRle ? rleChunks[chunkIdx] : rawData.slice(offset, offset + chunkSize);
-    const currentTime = (new Date().getTime() - startTime) / 1000.0;
-    setStatus(`${stepName}块: ${chunkIdx + 1}/${count}, 总用时: ${currentTime}s`);
-
     let cfg = rleSupport
       ? (step === 'bw' ? 0 : 1) | (chunkIdx === 0 ? 2 : 0) | (useRle ? 4 : 0)
       : (step === 'bw' ? 0x0F : 0x00) | (chunkIdx === 0 ? 0x00 : 0xF0);
@@ -1879,10 +1873,6 @@ async function writeImage(data, step = 'bw', waitForPrepare = false, commandWrit
 
     const percent = Math.floor((chunkIdx + 1) * 100 / count);
     if (onProgress) onProgress(chunkIdx + 1, count, percent);
-    if (percent >= nextLogPercent || chunkIdx + 1 === count) {
-      addLog(`${stepName}传输进度：${percent}% (${chunkIdx + 1}/${count} 包)`, '⇑');
-      while (nextLogPercent <= percent) nextLogPercent += 10;
-    }
   }
 
   return true;
@@ -2073,7 +2063,7 @@ function applyPanelId(panelId, transport = 'Web Bluetooth') {
   driverSelect.value = String(panelId);
   document.getElementById('ditherMode').value = mode;
   updateTgzOfficialFilterAvailability(mode);
-  document.getElementById('canvasSize').value = 'TGZ_760_528';
+  document.getElementById('canvasSize').value = 'TGZ_760_568';
   updateCanvasSize({ reloadImage: false });
   updateDitcherOptions({ reloadImage: false });
   const label = `${TGZ_PANEL_NAMES[panelId]} · ${mode === 'fourColor' ? '四色' : '六色'}`;
@@ -2681,8 +2671,8 @@ async function writeTgzImage(imageData, mode, refreshAfterSave) {
     mirrorHorizontal: true,
   });
   const imageOptions = {
-    width: 760,
-    height: 528,
+    width: TGZ_WIDTH,
+    height: TGZ_HEIGHT,
     chunkSize: TGZ_RLE_CHUNK_SIZE,
     packetBase: 1,
   };
@@ -2693,8 +2683,8 @@ async function writeTgzImage(imageData, mode, refreshAfterSave) {
   if (!transfer || !transfer.compressed) {
     transfer = {
       requests: MemobusClient.createImageRequests(packed, {
-        width: 760,
-        height: 528,
+        width: TGZ_WIDTH,
+        height: TGZ_HEIGHT,
         chunkSize: 4096,
         packetBase: 1,
       }),
@@ -2704,16 +2694,7 @@ async function writeTgzImage(imageData, mode, refreshAfterSave) {
     };
   }
 
-  if (transfer.compressed) {
-    const ratio = transfer.transferBytes / transfer.sourceBytes * 100;
-    addLog(`RLE 压缩：${transfer.sourceBytes} -> ${transfer.transferBytes} 字节 (${ratio.toFixed(1)}%)`);
-  } else {
-    addLog(`使用原始传输：${transfer.sourceBytes} 字节`);
-  }
-  addLog(`开始发送：${mode === 'fourColor' ? '四色' : '六色'}，${transfer.requests.length} 个图像分包`);
-
   tgzImageErrorResponse = null;
-  const startedAt = performance.now();
   let finalAckPromise = null;
   for (let index = 0; index < transfer.requests.length; index++) {
     if (index === transfer.requests.length - 1) {
@@ -2724,12 +2705,12 @@ async function writeTgzImage(imageData, mode, refreshAfterSave) {
       );
     }
     await writeTgzFrame(transfer.requests[index], {
-      fast: true,
+      fast: false,
       onPacket(completed, total) {
         const frameProgress = index + completed / total;
         const exactProgress = Math.min(99, frameProgress / transfer.requests.length * 99);
         const percent = Math.floor(exactProgress);
-        setStatus(`正在传输 ${percent}% · ${index + 1}/${transfer.requests.length}`);
+        setStatus(`正在传输... ${percent}% · 耗时 ${getTgzTransferElapsedSeconds().toFixed(1)} 秒`);
         updateTgzTransferOverlay(exactProgress);
       },
     });
@@ -2738,14 +2719,11 @@ async function writeTgzImage(imageData, mode, refreshAfterSave) {
     }
   }
 
-  const writtenSeconds = (performance.now() - startedAt) / 1000;
-  addLog(`${transfer.requests.length} 个图像分包已写入 BLE，用时 ${writtenSeconds.toFixed(1)} 秒`);
   setStatus('设备正在校验并写入 Flash...');
   const finalAck = await finalAckPromise;
   if (finalAck.status !== 0) throw new Error(`设备拒绝图像，状态 ${finalAck.status}`);
   updateTgzTransferOverlay(100);
   setStatus(refreshAfterSave ? '图片已保存，屏幕刷新中...' : '图片已保存到外置 Flash。');
-  addLog(`设备已完整接收图片，总用时 ${((performance.now() - startedAt) / 1000).toFixed(1)} 秒`);
 }
 
 async function sendimgNative(options = {}) {
@@ -2805,7 +2783,7 @@ async function sendimgNative(options = {}) {
     writeNativeNrfCommand,
     (completed, total, percent) => {
       const exactProgress = Math.min(99, completed * 99 / total);
-      setStatus(`正在传输 ${percent}% · ${completed}/${total}`);
+      setStatus(`正在传输... ${percent}% · 耗时 ${getTgzTransferElapsedSeconds().toFixed(1)} 秒`);
       updateTgzTransferOverlay(exactProgress);
     }
   );
@@ -3300,7 +3278,7 @@ function handleNotify(value, idx) {
   } else {
     if (textDecoder == null) textDecoder = new TextDecoder();
     const msg = textDecoder.decode(data);
-    if (!msg.startsWith('chunk=')) addLog(msg, '⇓');
+    if (!msg.startsWith('chunk=') && msg !== 'image=flow') addLog(msg, '⇓');
     if (applySlotsMessage(msg)) {
       addLog('图片槽位状态已更新。');
     } else if (msg === 'ready=1') {
@@ -3612,6 +3590,8 @@ function updateCanvasSize(options = {}) {
 
 function prepareTgzTransferPreview() {
   const preview = document.getElementById('tgzTransferPreview');
+  preview.width = canvas.width;
+  preview.height = canvas.height;
   const previewContext = preview.getContext('2d');
   previewContext.fillStyle = '#f1f1f1';
   previewContext.fillRect(0, 0, preview.width, preview.height);
@@ -3619,10 +3599,37 @@ function prepareTgzTransferPreview() {
   preview.style.clipPath = 'inset(0 0 100% 0)';
 }
 
+function getTgzTransferElapsedSeconds() {
+  return tgzTransferStartedAt > 0 ? (performance.now() - tgzTransferStartedAt) / 1000 : 0;
+}
+
+function updateTgzTransferElapsed() {
+  const elapsed = document.getElementById('tgzTransferElapsed');
+  if (elapsed) elapsed.textContent = `耗时 ${getTgzTransferElapsedSeconds().toFixed(1)} 秒`;
+}
+
+function logTgzTransferProgress(progress) {
+  const visiblePercent = Math.floor(progress);
+  while (tgzTransferNextLogPercent <= 90 && visiblePercent >= tgzTransferNextLogPercent) {
+    addLog(`传图进度：${tgzTransferNextLogPercent}% · 耗时 ${getTgzTransferElapsedSeconds().toFixed(1)} 秒`);
+    tgzTransferNextLogPercent += 10;
+  }
+}
+
 function showTgzTransferOverlay() {
+  const visual = document.getElementById('tgzTransferVisual');
   const overlay = document.getElementById('tgzTransferOverlay');
   prepareTgzTransferPreview();
+  tgzTransferStartedAt = performance.now();
+  tgzTransferNextLogPercent = 10;
+  visual.hidden = false;
   overlay.hidden = false;
+  document.getElementById('tgzTransferTitle').textContent = '正在传输... 0%';
+  document.getElementById('tgzTransferBar').style.width = '0%';
+  updateTgzTransferElapsed();
+  if (tgzTransferElapsedTimer != null) clearInterval(tgzTransferElapsedTimer);
+  tgzTransferElapsedTimer = setInterval(updateTgzTransferElapsed, 100);
+  addLog('传图进度：0% · 耗时 0.0 秒');
   updateTgzTransferOverlay(0);
 }
 
@@ -3635,29 +3642,40 @@ function updateTgzTransferOverlay(progress) {
     document.getElementById('tgzTransferPreview').style.clipPath =
       `inset(0 0 ${100 - normalized}% 0)`;
     document.getElementById('tgzTransferTitle').textContent = normalized < 100
-      ? `正在传输 ${visiblePercent}%`
-      : '传输完成，屏幕刷新中';
+      ? `正在传输... ${visiblePercent}%`
+      : '传输完成 100%';
     document.getElementById('tgzTransferBar').style.width = `${normalized}%`;
+    updateTgzTransferElapsed();
+    logTgzTransferProgress(normalized);
+    if (normalized >= 100 && tgzTransferElapsedTimer != null) {
+      clearInterval(tgzTransferElapsedTimer);
+      tgzTransferElapsedTimer = null;
+      addLog(`传图进度：100% · 总耗时 ${getTgzTransferElapsedSeconds().toFixed(1)} 秒`);
+    }
     tgzTransferProgressFrame = null;
   });
 }
 
 function hideTgzTransferOverlay() {
   if (tgzTransferProgressFrame != null) cancelAnimationFrame(tgzTransferProgressFrame);
+  if (tgzTransferElapsedTimer != null) clearInterval(tgzTransferElapsedTimer);
   tgzTransferProgressFrame = null;
+  tgzTransferElapsedTimer = null;
   tgzTransferTargetProgress = 0;
+  tgzTransferStartedAt = 0;
+  document.getElementById('tgzTransferVisual').hidden = true;
   document.getElementById('tgzTransferOverlay').hidden = true;
 }
 
 function configureTgzUi() {
   const driverSelect = document.getElementById('epddriver');
   driverSelect.innerHTML = [
-    '<option value="0" data-color="fourColor" data-size="TGZ_760_528">自动识别</option>',
-    '<option value="1" data-color="fourColor" data-size="TGZ_760_528">SE0398 A0</option>',
-    '<option value="2" data-color="fourColor" data-size="TGZ_760_528">SE0398 New-A1</option>',
-    '<option value="3" data-color="sixColor" data-size="TGZ_760_528">3.65 英寸六色 E6</option>',
-    '<option value="4" data-color="sixColor" data-size="TGZ_760_528">3.98 英寸六色 E6</option>',
-    '<option value="5" data-color="sixColor" data-size="TGZ_760_528">3.68 英寸六色 E6</option>',
+    '<option value="0" data-color="fourColor" data-size="TGZ_760_568">自动识别</option>',
+    '<option value="1" data-color="fourColor" data-size="TGZ_760_568">SE0398 A0</option>',
+    '<option value="2" data-color="fourColor" data-size="TGZ_760_568">SE0398 New-A1</option>',
+    '<option value="3" data-color="sixColor" data-size="TGZ_760_568">3.65 英寸六色 E6</option>',
+    '<option value="4" data-color="sixColor" data-size="TGZ_760_568">3.98 英寸六色 E6</option>',
+    '<option value="5" data-color="sixColor" data-size="TGZ_760_568">3.68 英寸六色 E6</option>',
   ].join('');
   driverSelect.value = '0';
   driverSelect.closest('.flex-group').classList.remove('debug');
@@ -3665,7 +3683,7 @@ function configureTgzUi() {
   pins.hidden = true;
   if (pins.previousElementSibling) pins.previousElementSibling.hidden = true;
   document.getElementById('setDriverbutton').textContent = '切换';
-  document.getElementById('canvasSize').value = 'TGZ_760_528';
+  document.getElementById('canvasSize').value = 'TGZ_760_568';
   document.getElementById('slotRefreshAfterSave').addEventListener('change', async event => {
     if (!isBleConnected()) return;
     try {

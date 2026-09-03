@@ -6,7 +6,7 @@
 	<meta name="viewport" content="width=device-width, initial-scale=1">
 	<title>TGZ-52811</title>
 	<link rel="shortcut icon" type="image/png" href="favicon.png">
-	<link rel="stylesheet" href="css/main.css?v=2026082610">
+	<link rel="stylesheet" href="css/main.css?v=2026090101">
 </head>
 
 <body>
@@ -160,7 +160,7 @@
 				<div class="flex-group debug">
 					<label for="canvasSize">画布尺寸:</label>
 					<select id="canvasSize" onchange="updateCanvasSize()">
-						<option value="TGZ_760_528" selected>TGZ 相纸 (760x528)</option>
+						<option value="TGZ_760_568" selected>TGZ 相纸 (760x568)</option>
 						<option value="1.54_152_152">1.54 (152x152)</option>
 						<option value="1.54_200_200">1.54 (200x200)</option>
 						<option value="2.13_212_104">2.13 (212x104)</option>
@@ -269,13 +269,15 @@
 				<div class="canvas-title"></div>
 				<div class="tgz-canvas-stage">
 					<canvas id="canvas" width="760" height="528"></canvas>
-					<div id="tgzTransferOverlay" class="tgz-transfer-overlay" role="status" aria-live="polite" hidden>
-						<canvas id="tgzTransferPreview" width="760" height="528" aria-label="正在发送的图片预览"></canvas>
-						<div class="tgz-transfer-feedback">
-							<strong id="tgzTransferTitle">正在传输 0%</strong>
-							<span>进度来自实际蓝牙写入</span>
-							<div class="tgz-transfer-track"><i id="tgzTransferBar"></i></div>
-						</div>
+					<div id="tgzTransferVisual" class="tgz-transfer-visual" hidden>
+						<canvas id="tgzTransferPreview" width="760" height="528"></canvas>
+					</div>
+				</div>
+				<div id="tgzTransferOverlay" class="tgz-transfer-overlay" role="status" aria-live="polite" hidden>
+					<div class="tgz-transfer-feedback">
+						<div class="tgz-transfer-track"><i id="tgzTransferBar"></i></div>
+						<strong id="tgzTransferTitle">正在传输... 0%</strong>
+						<span id="tgzTransferElapsed">耗时 0.0 秒</span>
 					</div>
 				</div>
 				<div class="flex-container options dither-adjust-row">
@@ -562,7 +564,7 @@
 	<script type="text/javascript" src="js/crop.js?v=2026082801"></script>
 	<script type="text/javascript" src="js/secure-dfu.js?v=2026072703"></script>
 	<script type="text/javascript" src="js/memobus-client.js?v=2026082606"></script>
-	<script type="text/javascript" src="js/main.js?v=2026082804"></script>
+	<script type="text/javascript" src="js/main.js?v=2026090101"></script>
 </body>
 
 </html>

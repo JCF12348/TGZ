@@ -42,7 +42,7 @@ class CropManager {
     if (version === 3 && width === 480 && height === 720) return 149;
     if (version === 4 && width === 528 && height === 768) return 145;
     if (version >= 5 && version <= 8 && width === 568 && height === 760) return 133;
-    if (version === 9 && width === 528 && height === 760) return 133;
+    if (version === 9 && width === 568 && height === 760) return 133;
     return 100;
   }
 
