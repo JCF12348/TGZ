@@ -363,6 +363,12 @@
         !Number.isInteger(imageData.height)) {
       throw new TypeError('Valid ImageData-compatible input is required');
     }
+    const expectedWidth = Number(options && options.expectedWidth);
+    const expectedHeight = Number(options && options.expectedHeight);
+    if (Number.isInteger(expectedWidth) && Number.isInteger(expectedHeight) &&
+        (imageData.width !== expectedWidth || imageData.height !== expectedHeight)) {
+      throw new RangeError(`Official image must be ${expectedWidth}x${expectedHeight}`);
+    }
     const pixelCount = imageData.width * imageData.height;
     if ((pixelCount & 1) !== 0 || imageData.data.length !== pixelCount * 4) {
       throw new RangeError('Image dimensions or RGBA data length are invalid');

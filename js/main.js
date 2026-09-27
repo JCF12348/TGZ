@@ -119,7 +119,7 @@ const EPD_SERVICE_UUID = '0000ffff-0000-1000-8000-00805f9b34fb';
 const EPD_WRITE_UUID = '0000ff01-0000-1000-8000-00805f9b34fb';
 const EPD_NOTIFY_UUID = '0000ff02-0000-1000-8000-00805f9b34fb';
 const TGZ_WIDTH = 760;
-const TGZ_HEIGHT = 568;
+const TGZ_HEIGHT = 528;
 const DEFAULT_OFFICIAL_PAPER_INFO = Object.freeze({
   version: 9,
   calibration: 100,
@@ -173,7 +173,7 @@ const LED_CONTROL_MIN_VERSION = 0x40;
 let firmwareVersion = { label: '未知', ledControl: false, directImagePrepare: false, outdated: true };
 
 const canvasSizes = [
-  { name: 'TGZ_760_568', width: 760, height: 568 },
+  { name: 'TGZ_760_528', width: 760, height: 528 },
   { name: '1.54_152_152', width: 152, height: 152 },
   { name: '1.54_200_200', width: 200, height: 200 },
   { name: '2.13_212_104', width: 212, height: 104 },
@@ -2063,7 +2063,7 @@ function applyPanelId(panelId, transport = 'Web Bluetooth') {
   driverSelect.value = String(panelId);
   document.getElementById('ditherMode').value = mode;
   updateTgzOfficialFilterAvailability(mode);
-  document.getElementById('canvasSize').value = 'TGZ_760_568';
+  document.getElementById('canvasSize').value = 'TGZ_760_528';
   updateCanvasSize({ reloadImage: false });
   updateDitcherOptions({ reloadImage: false });
   const label = `${TGZ_PANEL_NAMES[panelId]} · ${mode === 'fourColor' ? '四色' : '六色'}`;
@@ -2669,6 +2669,8 @@ function convertGDEM037F51(data, srcWidth = canvas.width, srcHeight = canvas.hei
 async function writeTgzImage(imageData, mode, refreshAfterSave) {
   const packed = MemobusClient.packOfficialPalettePixels(imageData, mode, {
     mirrorHorizontal: true,
+    expectedWidth: TGZ_WIDTH,
+    expectedHeight: TGZ_HEIGHT,
   });
   const imageOptions = {
     width: TGZ_WIDTH,
@@ -2737,6 +2739,8 @@ async function sendimgNative(options = {}) {
   const finalImageData = decodeProcessedData(processedData, canvas.width, canvas.height, mode);
   const packedPixels = MemobusClient.packOfficialPalettePixels(finalImageData, mode, {
     mirrorHorizontal: true,
+    expectedWidth: TGZ_WIDTH,
+    expectedHeight: TGZ_HEIGHT,
   });
   const requestedSlot = Number.isInteger(options.slot) ? options.slot : null;
   const storeRequested = true;
@@ -3670,12 +3674,12 @@ function hideTgzTransferOverlay() {
 function configureTgzUi() {
   const driverSelect = document.getElementById('epddriver');
   driverSelect.innerHTML = [
-    '<option value="0" data-color="fourColor" data-size="TGZ_760_568">自动识别</option>',
-    '<option value="1" data-color="fourColor" data-size="TGZ_760_568">SE0398 A0</option>',
-    '<option value="2" data-color="fourColor" data-size="TGZ_760_568">SE0398 New-A1</option>',
-    '<option value="3" data-color="sixColor" data-size="TGZ_760_568">3.65 英寸六色 E6</option>',
-    '<option value="4" data-color="sixColor" data-size="TGZ_760_568">3.98 英寸六色 E6</option>',
-    '<option value="5" data-color="sixColor" data-size="TGZ_760_568">3.68 英寸六色 E6</option>',
+    '<option value="0" data-color="fourColor" data-size="TGZ_760_528">自动识别</option>',
+    '<option value="1" data-color="fourColor" data-size="TGZ_760_528">SE0398 A0</option>',
+    '<option value="2" data-color="fourColor" data-size="TGZ_760_528">SE0398 New-A1</option>',
+    '<option value="3" data-color="sixColor" data-size="TGZ_760_528">3.65 英寸六色 E6</option>',
+    '<option value="4" data-color="sixColor" data-size="TGZ_760_528">3.98 英寸六色 E6</option>',
+    '<option value="5" data-color="sixColor" data-size="TGZ_760_528">3.68 英寸六色 E6</option>',
   ].join('');
   driverSelect.value = '0';
   driverSelect.closest('.flex-group').classList.remove('debug');
@@ -3683,7 +3687,7 @@ function configureTgzUi() {
   pins.hidden = true;
   if (pins.previousElementSibling) pins.previousElementSibling.hidden = true;
   document.getElementById('setDriverbutton').textContent = '切换';
-  document.getElementById('canvasSize').value = 'TGZ_760_568';
+  document.getElementById('canvasSize').value = 'TGZ_760_528';
   document.getElementById('slotRefreshAfterSave').addEventListener('change', async event => {
     if (!isBleConnected()) return;
     try {
